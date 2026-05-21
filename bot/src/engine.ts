@@ -1,15 +1,18 @@
 // ============================================================================
-// engine.ts — Top-level orchestrator. Glues:
-//   WebSocket (live candles)  →  SMCEngine (signal)  →  RiskManager (order)
+// engine.ts — Top-level orchestrator. Wires together:
+//   WebSocket (multi-symbol candles) → Screener (SMC + Coinglass) → RiskManager
+//   PositionReconciler (background poll → PnL booking in Trade table)
 // ----------------------------------------------------------------------------
 // Lifecycle:
 //   1. Load BotConfig from DB (decrypts API creds in memory only)
-//   2. Build BinanceFuturesClient + RiskManager
-//   3. Apply leverage/marginType to the symbol
-//   4. Start WS, evaluate on every CLOSED candle, execute high-confidence signals
-//
-// Failure handling: any exception is logged + persisted to EventLog. The
-// stream auto-reconnects; the engine itself keeps running.
+//   2. Resolve the watchlist (DB > env)
+//   3. Build BinanceFuturesClient, RiskManager, CoinglassClient, Screener
+//   4. Apply leverage/marginType per-symbol lazily on first execution
+//   5. Start multi-stream WS; on each closed candle hand it to the screener
+//   6. Screener picks best symbol across the watchlist and emits a winning
+//      signal (or none); winners are executed by the risk manager
+//   7. PositionReconciler ticks every RECONCILER_INTERVAL_MS to detect
+//      closes and book Trade rows
 // ============================================================================
 
 import { prisma } from "./shared/db.js";
@@ -19,36 +22,35 @@ import { decryptSecret } from "./shared/crypto.js";
 import { BinanceStream } from "./websocket/binanceStream.js";
 import { BinanceFuturesClient } from "./execution/binanceClient.js";
 import { RiskManager } from "./execution/riskManager.js";
-import { SMCEngine, DEFAULT_SMC_CONFIG } from "./strategy/smc.js";
+import { Screener } from "./screener/screener.js";
+import { resolveWatchlist } from "./screener/symbols.js";
+import { CoinglassClient } from "./external/coinglass.js";
+import { PositionReconciler } from "./reconciler/positionReconciler.js";
 import type { Candle } from "./shared/types.js";
 
 export class TradingEngine {
   private stream?: BinanceStream;
-  private smc?: SMCEngine;
+  private screener?: Screener;
   private risk?: RiskManager;
-  private lastEvaluatedCandleTime = 0;
+  private reconciler?: PositionReconciler;
+  private lastEvaluatedAt = new Map<string, number>(); // symbol → last candle openTime
 
   async start(): Promise<void> {
     const cfg = await prisma.botConfig.findFirst({ where: { enabled: true } });
     if (!cfg) {
-      logger.warn("No enabled BotConfig row found. Create one via the dashboard, then restart.");
+      logger.warn("No enabled BotConfig row found. POST /api/config and set enabled:true.");
       return;
     }
 
-    // Decrypt credentials in memory only. Never log them.
-    const apiKey = decryptSecret({
-      cipher: cfg.apiKeyCipher, iv: cfg.apiKeyIv, tag: cfg.apiKeyTag,
-    });
-    const apiSecret = decryptSecret({
-      cipher: cfg.apiSecretCipher, iv: cfg.apiSecretIv, tag: cfg.apiSecretTag,
-    });
+    // Decrypt credentials in memory only — never logged.
+    const apiKey = decryptSecret({ cipher: cfg.apiKeyCipher, iv: cfg.apiKeyIv, tag: cfg.apiKeyTag });
+    const apiSecret = decryptSecret({ cipher: cfg.apiSecretCipher, iv: cfg.apiSecretIv, tag: cfg.apiSecretTag });
 
     const client = new BinanceFuturesClient({ apiKey, apiSecret });
 
-    // Clock-skew sanity (warn if local clock is off by >1s).
+    // Clock-skew sanity.
     try {
-      const serverTime = await client.serverTime();
-      const skew = Math.abs(serverTime - Date.now());
+      const skew = Math.abs((await client.serverTime()) - Date.now());
       if (skew > 1000) {
         await recordEvent("execution", "warn", "Clock skew >1s vs Binance server", { skewMs: skew });
       }
@@ -59,30 +61,33 @@ export class TradingEngine {
       return;
     }
 
+    const watchlist = resolveWatchlist(cfg);
+    const interval = cfg.interval;
+    const minConfidence = cfg.minConfidence ?? env.MIN_CONFIDENCE;
+
     this.risk = new RiskManager(client, {
-      symbol: cfg.symbol,
       leverage: cfg.leverage,
       marginType: cfg.marginType as "ISOLATED" | "CROSSED",
       riskPercent: cfg.riskPercent,
       maxConcurrent: cfg.maxConcurrent,
     });
-    await this.risk.ensureSymbolSettings();
 
-    this.smc = new SMCEngine({
-      ...DEFAULT_SMC_CONFIG,
-      symbol: cfg.symbol,
-      interval: cfg.interval,
-    });
+    const coinglass = new CoinglassClient();
+    this.screener = new Screener({ interval, symbols: watchlist, minConfidence }, coinglass);
+
+    this.reconciler = new PositionReconciler(client);
+    this.reconciler.start();
 
     this.stream = new BinanceStream({
-      symbol: cfg.symbol,
-      interval: cfg.interval,
+      subscriptions: watchlist.map((s) => ({ symbol: s, interval })),
       bufferSize: env.CANDLE_HISTORY,
     });
 
-    this.stream.on("candle", (closed: Candle, all: Candle[]) => {
-      this.onClosedCandle(closed, all).catch(async (err) => {
-        await recordEvent("strategy", "error", "onClosedCandle failed", { err: err.message });
+    this.stream.on("candle", (symbol: string, closed: Candle, all: Candle[]) => {
+      this.onClosedCandle(symbol, closed, all).catch(async (err) => {
+        await recordEvent("strategy", "error", "onClosedCandle failed", {
+          symbol, err: err.message,
+        });
       });
     });
     this.stream.on("error", async (err) => {
@@ -91,28 +96,49 @@ export class TradingEngine {
 
     this.stream.connect();
     await recordEvent("engine", "info", "Engine started", {
-      symbol: cfg.symbol, interval: cfg.interval, live: env.LIVE_TRADING, testnet: env.TESTNET,
+      symbols: watchlist, interval, live: env.LIVE_TRADING, testnet: env.TESTNET,
+      coinglass: env.hasCoinglass, minConfidence,
     });
   }
 
-  private async onClosedCandle(closed: Candle, all: Candle[]): Promise<void> {
-    // De-dupe: WS can occasionally re-emit a closed candle.
-    if (closed.openTime <= this.lastEvaluatedCandleTime) return;
-    this.lastEvaluatedCandleTime = closed.openTime;
+  private async onClosedCandle(symbol: string, closed: Candle, all: Candle[]): Promise<void> {
+    // De-dupe: WS can re-emit a closed candle.
+    if ((this.lastEvaluatedAt.get(symbol) ?? 0) >= closed.openTime) return;
+    this.lastEvaluatedAt.set(symbol, closed.openTime);
 
-    if (!this.smc || !this.risk) return;
+    if (!this.screener || !this.risk) return;
 
-    const signal = this.smc.evaluate(all);
-    if (!signal) return;
+    const result = await this.screener.onClosedCandle(symbol, all);
+    if (!result?.selected) return;
 
+    const { signal, confluence, finalConfidence } = result.selected;
     logger.info(
-      { kind: signal.kind, side: signal.side, entry: signal.entryPrice, sl: signal.stopLoss, tp: signal.takeProfit, conf: signal.confidence },
-      "Signal produced"
+      {
+        symbol: signal.symbol, kind: signal.kind, side: signal.side,
+        entry: signal.entryPrice, sl: signal.stopLoss, tp: signal.takeProfit,
+        baseConf: signal.confidence, conf: finalConfidence,
+        coinglass: confluence.multiplier,
+      },
+      "Winning signal — executing"
     );
-    await this.risk.execute(signal);
+
+    // Find the just-persisted Signal row to link orders/trades to it.
+    const sigRow = await prisma.signal.findFirst({
+      where: {
+        symbol: signal.symbol,
+        screeningRunId: result.runId,
+      },
+      orderBy: { id: "desc" },
+    });
+
+    await this.risk.execute(
+      { ...signal, confidence: finalConfidence },
+      sigRow?.id
+    );
   }
 
   async stop(): Promise<void> {
+    this.reconciler?.stop();
     this.stream?.close();
     await prisma.$disconnect();
   }

@@ -20,12 +20,16 @@ const bodySchema = z.object({
   testnet: z.boolean().default(true),
   apiKey: z.string().min(10),
   apiSecret: z.string().min(10),
+  watchlist: z.array(z.string().regex(/^[A-Z0-9]{4,20}$/))
+    .min(1).max(50)
+    .default(["BTCUSDT"]),
   symbol: z.string().regex(/^[A-Z0-9]{4,20}$/).default("BTCUSDT"),
   interval: z.enum(["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]).default("15m"),
   leverage: z.number().int().min(1).max(125).default(5),
   marginType: z.enum(["ISOLATED", "CROSSED"]).default("ISOLATED"),
   riskPercent: z.number().min(0.1).max(50).default(1.0),
   maxConcurrent: z.number().int().min(1).max(10).default(1),
+  minConfidence: z.number().min(0).max(1).default(0.6),
   enabled: z.boolean().default(false),
 });
 
@@ -36,18 +40,22 @@ export async function GET(req: Request) {
   const cfg = await prisma.botConfig.findFirst({ orderBy: { id: "asc" } });
   if (!cfg) return NextResponse.json({ config: null });
 
-  // Never return the encrypted ciphertext to the client.
+  let parsedWatchlist: string[] = [];
+  try { parsedWatchlist = JSON.parse(cfg.watchlist); } catch { /* default empty */ }
+
   return NextResponse.json({
     config: {
       id: cfg.id,
       label: cfg.label,
       testnet: cfg.testnet,
+      watchlist: parsedWatchlist,
       symbol: cfg.symbol,
       interval: cfg.interval,
       leverage: cfg.leverage,
       marginType: cfg.marginType,
       riskPercent: cfg.riskPercent,
       maxConcurrent: cfg.maxConcurrent,
+      minConfidence: cfg.minConfidence,
       enabled: cfg.enabled,
       updatedAt: cfg.updatedAt,
     },
@@ -74,12 +82,14 @@ export async function POST(req: Request) {
     testnet: parsed.testnet,
     apiKeyCipher: k.cipher, apiKeyIv: k.iv, apiKeyTag: k.tag,
     apiSecretCipher: s.cipher, apiSecretIv: s.iv, apiSecretTag: s.tag,
+    watchlist: JSON.stringify(parsed.watchlist),
     symbol: parsed.symbol,
     interval: parsed.interval,
     leverage: parsed.leverage,
     marginType: parsed.marginType,
     riskPercent: parsed.riskPercent,
     maxConcurrent: parsed.maxConcurrent,
+    minConfidence: parsed.minConfidence,
     enabled: parsed.enabled,
   };
 

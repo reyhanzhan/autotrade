@@ -12,9 +12,7 @@ const truthy = z
 
 const schema = z.object({
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
-  ENCRYPTION_KEY: z
-    .string()
-    .min(1, "ENCRYPTION_KEY is required (run `npm run keygen`)"),
+  ENCRYPTION_KEY: z.string().min(1, "ENCRYPTION_KEY is required (run `npm run keygen`)"),
 
   TESTNET: truthy.default("true"),
   SYMBOLS: z.string().default("BTCUSDT"),
@@ -24,7 +22,14 @@ const schema = z.object({
   DEFAULT_LEVERAGE: z.coerce.number().int().min(1).max(125).default(5),
   DEFAULT_RISK_PERCENT: z.coerce.number().min(0.1).max(50).default(1.0),
   CANDLE_HISTORY: z.coerce.number().int().min(50).max(1500).default(500),
+  MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.6),
   LIVE_TRADING: truthy.default("false"),
+  RECONCILER_INTERVAL_MS: z.coerce.number().int().min(5_000).max(600_000).default(30_000),
+
+  // Coinglass (all optional — bot works without it)
+  COINGLASS_API_KEY: z.string().optional().default(""),
+  COINGLASS_BASE_URL: z.string().url().default("https://open-api-v3.coinglass.com"),
+  COINGLASS_CACHE_MS: z.coerce.number().int().min(10_000).max(3_600_000).default(300_000),
 
   WEB_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   DASHBOARD_API_TOKEN: z.string().min(16, "DASHBOARD_API_TOKEN must be >= 16 chars"),
@@ -36,7 +41,6 @@ const schema = z.object({
 
 const parsed = schema.safeParse(process.env);
 if (!parsed.success) {
-  // Print every issue, then exit. Do not throw — PM2 would just restart loop.
   console.error("Invalid environment configuration:");
   for (const issue of parsed.error.issues) {
     console.error(`  - ${issue.path.join(".")}: ${issue.message}`);
@@ -46,11 +50,19 @@ if (!parsed.success) {
 
 export const env = {
   ...parsed.data,
-  /** Pre-split list of symbols (uppercased). */
-  symbolList: parsed.data.SYMBOLS.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean),
+  /** Pre-split list of symbols (uppercased, de-duped). */
+  symbolList: dedupe(
+    parsed.data.SYMBOLS.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean)
+  ),
+  /** True only if Coinglass key is present. */
+  hasCoinglass: parsed.data.COINGLASS_API_KEY.length > 0,
 };
 
 export const BINANCE_ENDPOINTS = {
   rest: env.TESTNET ? "https://testnet.binancefuture.com" : "https://fapi.binance.com",
-  ws: env.TESTNET ? "wss://stream.binancefuture.com/ws" : "wss://fstream.binance.com/ws",
+  ws: env.TESTNET ? "wss://stream.binancefuture.com" : "wss://fstream.binance.com",
 } as const;
+
+function dedupe<T>(xs: T[]): T[] {
+  return Array.from(new Set(xs));
+}

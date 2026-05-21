@@ -140,6 +140,20 @@ export class BinanceFuturesClient {
     return this.signedDelete("/fapi/v1/allOpenOrders", { symbol });
   }
 
+  /** Query a single order by exchange orderId. Used by the reconciler to
+   *  detect which protective order (SL vs TP) actually filled. */
+  async queryOrder(symbol: string, orderId: number): Promise<Record<string, unknown>> {
+    return this.signedGet("/fapi/v1/order", { symbol, orderId });
+  }
+
+  /** User-account trades for a symbol, optionally since `startTimeMs`.
+   *  Used by the reconciler to compute realized PnL on a closed position. */
+  async userTrades(symbol: string, startTimeMs?: number, limit = 100): Promise<Array<Record<string, unknown>>> {
+    const params: Record<string, unknown> = { symbol, limit };
+    if (startTimeMs) params.startTime = startTimeMs;
+    return this.signedGet("/fapi/v1/userTrades", params);
+  }
+
   /** Exchange filters (LOT_SIZE, PRICE_FILTER, MIN_NOTIONAL) — needed for
    *  rounding qty and price correctly. Cached because it rarely changes. */
   private filtersCache?: Map<string, Record<string, unknown>>;

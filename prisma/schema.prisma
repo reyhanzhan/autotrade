@@ -21,27 +21,35 @@ datasource db {
 // API credentials are NEVER stored in plain text. They are AES-256-GCM
 // encrypted at the application layer (see bot/src/shared/crypto.ts). For each
 // secret we persist three components: ciphertext, iv, authTag.
+// `watchlist` is a JSON array of symbols the screener will scan.
 // ----------------------------------------------------------------------------
 model BotConfig {
   id              Int      @id @default(autoincrement())
-  label           String   @unique               // e.g. "binance-futures-testnet"
+  label           String   @unique
   exchange        String   @default("BINANCE_FUTURES")
   testnet         Boolean  @default(true)
 
-  apiKeyCipher    String                          // base64 ciphertext
-  apiKeyIv        String                          // base64 12-byte IV
-  apiKeyTag       String                          // base64 16-byte auth tag
+  apiKeyCipher    String
+  apiKeyIv        String
+  apiKeyTag       String
 
   apiSecretCipher String
   apiSecretIv     String
   apiSecretTag    String
 
+  // Multi-symbol watchlist. Stored as JSON array, e.g. ["BTCUSDT","ETHUSDT"].
+  // If empty, falls back to env SYMBOLS.
+  watchlist       String   @default("[]")
+  // Legacy single-symbol field — kept for backward compat; primary symbol of
+  // the watchlist when ambiguous (e.g. for default leverage application).
   symbol          String   @default("BTCUSDT")
+
   interval        String   @default("15m")
   leverage        Int      @default(5)
-  marginType      String   @default("ISOLATED")   // ISOLATED | CROSSED
-  riskPercent     Float    @default(1.0)          // % of balance to risk per trade
-  maxConcurrent   Int      @default(1)            // max concurrent open positions
+  marginType      String   @default("ISOLATED")
+  riskPercent     Float    @default(1.0)
+  maxConcurrent   Int      @default(1)
+  minConfidence   Float    @default(0.6)
   enabled         Boolean  @default(false)
 
   createdAt       DateTime @default(now())
@@ -49,28 +57,79 @@ model BotConfig {
 }
 
 // ----------------------------------------------------------------------------
+// ScreeningRun — every multi-symbol scan the screener performs is recorded
+// here so the report page can show a full history of "what did the bot look
+// at, what did it pick, why".
+// ----------------------------------------------------------------------------
+model ScreeningRun {
+  id              Int      @id @default(autoincrement())
+  runAt           DateTime @default(now())
+  interval        String
+  symbolsScanned  String                              // JSON array
+  candidateCount  Int      @default(0)                // # symbols that produced any signal
+  selectedSymbol  String?
+  selectedSide    String?                             // LONG | SHORT
+  bestConfidence  Float?
+  reason          String?                             // why this was picked, or why nothing was
+
+  signals         Signal[]
+
+  @@index([runAt])
+}
+
+// ----------------------------------------------------------------------------
+// CoinglassSnapshot — captured derivatives metrics used for confluence.
+// We store the raw JSON so future scoring tweaks can backtest against history.
+// ----------------------------------------------------------------------------
+model CoinglassSnapshot {
+  id              Int      @id @default(autoincrement())
+  symbol          String
+  capturedAt      DateTime @default(now())
+
+  fundingRate     Float?                              // current funding rate
+  openInterest    Float?                              // USD value
+  oiChange24h     Float?                              // percent change
+  longShortRatio  Float?                              // top-trader L/S ratio
+  liqLong24h      Float?                              // USD long liquidations 24h
+  liqShort24h     Float?                              // USD short liquidations 24h
+
+  raw             String?                             // full vendor JSON
+
+  @@index([symbol, capturedAt])
+}
+
+// ----------------------------------------------------------------------------
 // Signal — every SMC/ICT pattern the engine detects is recorded here, whether
 // or not it is acted upon. Useful for backtesting and audit.
 // ----------------------------------------------------------------------------
 model Signal {
-  id          Int      @id @default(autoincrement())
-  symbol      String
-  interval    String
-  side        String   // LONG | SHORT
-  kind        String   // BOS_LONG | CHOCH_SHORT | OB_TAP_LONG | FVG_TAP_SHORT | ...
-  price       Float
-  stopLoss    Float?
-  takeProfit  Float?
-  confidence  Float    @default(0)   // 0..1, engine's own scoring
-  payload     String?                // JSON: { ob, fvg, structure, ... }
-  consumed    Boolean  @default(false)
-  createdAt   DateTime @default(now())
+  id              Int      @id @default(autoincrement())
+  symbol          String
+  interval        String
+  side            String                              // LONG | SHORT
+  kind            String                              // BOS_LONG | OB_TAP_LONG | FVG_TAP_SHORT | ...
+  price           Float
+  stopLoss        Float?
+  takeProfit      Float?
 
-  orders      Order[]
-  trades      Trade[]
+  baseConfidence  Float    @default(0)                // SMC-only score (0..1)
+  coinglassScore  Float?                              // multiplier applied by confluence (0..2)
+  confidence      Float    @default(0)                // final score after Coinglass adjustment
+
+  payload         String?                             // JSON: { ob, fvg, structure, coinglass, ... }
+  consumed        Boolean  @default(false)
+
+  screeningRun    ScreeningRun? @relation(fields: [screeningRunId], references: [id])
+  screeningRunId  Int?
+
+  orders          Order[]
+  trades          Trade[]
+
+  createdAt       DateTime @default(now())
 
   @@index([symbol, createdAt])
   @@index([consumed])
+  @@index([screeningRunId])
 }
 
 // ----------------------------------------------------------------------------
@@ -81,16 +140,16 @@ model Order {
   exchangeOrderId String?  @unique
   clientOrderId   String?  @unique
   symbol          String
-  side            String                            // BUY | SELL
-  positionSide    String   @default("BOTH")         // LONG | SHORT | BOTH (one-way mode)
-  type            String                            // MARKET | LIMIT | STOP_MARKET | TAKE_PROFIT_MARKET
-  status          String                            // NEW | FILLED | PARTIALLY_FILLED | CANCELED | REJECTED | EXPIRED
+  side            String                              // BUY | SELL
+  positionSide    String   @default("BOTH")
+  type            String                              // MARKET | LIMIT | STOP_MARKET | TAKE_PROFIT_MARKET
+  status          String                              // NEW | FILLED | CANCELED | REJECTED | EXPIRED
   price           Float?
   stopPrice       Float?
   quantity        Float
   reduceOnly      Boolean  @default(false)
   closePosition   Boolean  @default(false)
-  rawResponse     String?                           // JSON of exchange response
+  rawResponse     String?
 
   signal          Signal?  @relation(fields: [signalId], references: [id])
   signalId        Int?
@@ -103,19 +162,21 @@ model Order {
 }
 
 // ----------------------------------------------------------------------------
-// Trade — a fully-realized trade lifecycle (entry → exit).
+// Trade — a fully-realized trade lifecycle (entry → exit). The position
+// reconciler creates one row per closed position with realized PnL.
 // ----------------------------------------------------------------------------
 model Trade {
   id            Int       @id @default(autoincrement())
   symbol        String
-  side          String                              // LONG | SHORT
+  side          String                                // LONG | SHORT
   entryPrice    Float
   exitPrice     Float?
   quantity      Float
   leverage      Int
-  pnl           Float?                              // USDT realized PnL
+  pnl           Float?                                // USDT realized PnL
   pnlPercent    Float?
-  reason        String?                             // TP | SL | MANUAL | LIQUIDATION
+  reason        String?                               // TP | SL | MANUAL | LIQUIDATION
+
   openedAt      DateTime  @default(now())
   closedAt      DateTime?
 
@@ -127,33 +188,32 @@ model Trade {
 }
 
 // ----------------------------------------------------------------------------
-// Position — current open position(s). For one-way mode there is at most one
-// row per symbol; for hedge mode you would extend the unique key to (symbol, side).
+// Position — current open position(s). One row per (symbol) in one-way mode.
 // ----------------------------------------------------------------------------
 model Position {
   id            Int      @id @default(autoincrement())
   symbol        String   @unique
-  side          String                              // LONG | SHORT
+  side          String                                // LONG | SHORT
   entryPrice    Float
   quantity      Float
   leverage      Int
   stopLoss      Float?
   takeProfit    Float?
   unrealizedPnl Float    @default(0)
+  signalId      Int?
   openedAt      DateTime @default(now())
   updatedAt     DateTime @updatedAt
 }
 
 // ----------------------------------------------------------------------------
-// EventLog — structured engine events (separate from pino file logs; this is
-// what the dashboard reads).
+// EventLog — structured engine events surfaced on the dashboard.
 // ----------------------------------------------------------------------------
 model EventLog {
   id        Int      @id @default(autoincrement())
-  level     String                                  // info | warn | error
-  source    String                                  // websocket | strategy | execution | api
+  level     String                                    // info | warn | error
+  source    String                                    // websocket | strategy | execution | screener | coinglass | reconciler | api
   message   String
-  meta      String?                                 // JSON
+  meta      String?                                   // JSON
   createdAt DateTime @default(now())
 
   @@index([createdAt])

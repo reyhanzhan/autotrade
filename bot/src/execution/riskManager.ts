@@ -1,19 +1,20 @@
 // ============================================================================
-// riskManager.ts — Position sizing + bracket order execution.
+// riskManager.ts — Position sizing + bracket order execution (multi-symbol).
 // ----------------------------------------------------------------------------
 // Responsibilities:
+//   - For each symbol on first contact: apply marginType + leverage (idempotent)
 //   - Compute position size from (account equity × risk%) ÷ stop-distance
 //   - Round qty/price to the exchange's LOT_SIZE / PRICE_FILTER step
-//   - Place the entry MARKET order + two protective conditional orders:
-//       STOP_MARKET (closePosition=true) for the SL
-//       TAKE_PROFIT_MARKET (closePosition=true) for the TP
-//   - Persist Order rows and update the Position row
+//   - Place the entry MARKET order + STOP_MARKET (SL) + TAKE_PROFIT_MARKET (TP)
+//   - Persist Order rows + open the Position row
+//
+// The signal carries the symbol — RiskManager is symbol-agnostic at the
+// instance level. The concurrency cap is GLOBAL (across all symbols).
 //
 // SAFETY:
-//   - Never sizes beyond available margin × maxLeverage
-//   - Honors `LIVE_TRADING=false` — skips order placement and only records
-//     the signal (dry run). Use this on testnet first.
-//   - Enforces maxConcurrent positions per symbol from BotConfig.
+//   - Refuses orders below the symbol's minQty filter.
+//   - Honors LIVE_TRADING=false (dry run; Signal row only).
+//   - Global maxConcurrent across all open positions.
 // ============================================================================
 
 import { logger, recordEvent } from "../shared/logger.js";
@@ -23,73 +24,67 @@ import type { TradeSignal } from "../shared/types.js";
 import type { BinanceFuturesClient } from "./binanceClient.js";
 
 export interface RiskConfig {
-  symbol: string;
   leverage: number;
   marginType: "ISOLATED" | "CROSSED";
-  riskPercent: number;       // e.g. 1.0 = 1% of equity per trade
-  maxConcurrent: number;
+  riskPercent: number;          // 1.0 = 1% of equity per trade
+  maxConcurrent: number;        // global cap across all symbols
 }
 
 export class RiskManager {
+  /** Symbols that already had setMarginType + setLeverage applied. */
+  private readonly prepared = new Set<string>();
+
   constructor(
     private readonly client: BinanceFuturesClient,
     private readonly cfg: RiskConfig
   ) {}
 
-  /** One-time bootstrap: set leverage + margin type on the symbol. */
-  async ensureSymbolSettings(): Promise<void> {
-    await this.client.setMarginType(this.cfg.symbol, this.cfg.marginType);
-    await this.client.setLeverage(this.cfg.symbol, this.cfg.leverage);
-    logger.info(
-      { symbol: this.cfg.symbol, leverage: this.cfg.leverage, marginType: this.cfg.marginType },
-      "Symbol settings applied"
-    );
+  /** Idempotent: applies leverage + margin type to a symbol the first time it
+   *  is touched. Subsequent calls are no-ops. */
+  async ensureSettingsFor(symbol: string): Promise<void> {
+    if (this.prepared.has(symbol)) return;
+    try {
+      await this.client.setMarginType(symbol, this.cfg.marginType);
+      await this.client.setLeverage(symbol, this.cfg.leverage);
+      this.prepared.add(symbol);
+      logger.info({ symbol, leverage: this.cfg.leverage, marginType: this.cfg.marginType }, "Symbol prepared");
+    } catch (e) {
+      await recordEvent("execution", "warn", "Failed to prepare symbol — skipping", {
+        symbol, err: (e as Error).message,
+      });
+    }
   }
 
-  /** Execute a trade signal. Records the signal + orders in the DB. */
-  async execute(signal: TradeSignal): Promise<void> {
-    const signalRow = await prisma.signal.create({
-      data: {
-        symbol: signal.symbol,
-        interval: signal.interval,
-        side: signal.side,
-        kind: signal.kind,
-        price: signal.entryPrice,
-        stopLoss: signal.stopLoss,
-        takeProfit: signal.takeProfit,
-        confidence: signal.confidence,
-        payload: JSON.stringify(signal.context),
-      },
-    });
+  /** Execute a signal. The signal carries everything we need. */
+  async execute(signal: TradeSignal, signalRowId?: number): Promise<void> {
+    const symbol = signal.symbol;
 
     if (!env.LIVE_TRADING) {
-      await recordEvent("execution", "info", "Dry-run signal recorded", {
-        signalId: signalRow.id,
-        kind: signal.kind,
+      await recordEvent("execution", "info", "Dry-run signal (LIVE_TRADING=false)", {
+        signalRowId, kind: signal.kind, symbol,
       });
       return;
     }
 
-    // Concurrency cap
-    const open = await prisma.position.count({ where: { symbol: this.cfg.symbol } });
+    // GLOBAL concurrency cap.
+    const open = await prisma.position.count();
     if (open >= this.cfg.maxConcurrent) {
-      await recordEvent("execution", "warn", "Concurrency cap reached; skipping", {
-        symbol: this.cfg.symbol,
-        open,
-      });
+      await recordEvent("execution", "warn", "Global concurrency cap reached; skipping", { open });
       return;
     }
 
-    const account = await this.client.accountInfo();
-    const equity = Number((account as Record<string, unknown>).totalWalletBalance ?? 0);
+    await this.ensureSettingsFor(symbol);
+
+    const account = await this.client.accountInfo() as Record<string, unknown>;
+    const equity = Number(account.totalWalletBalance ?? 0);
     if (equity <= 0) {
       await recordEvent("execution", "error", "Account equity unavailable or zero", { account });
       return;
     }
 
     const filters = await this.client.exchangeInfo();
-    const sym = filters.get(this.cfg.symbol);
-    if (!sym) throw new Error(`Symbol filters missing for ${this.cfg.symbol}`);
+    const sym = filters.get(symbol);
+    if (!sym) throw new Error(`Symbol filters missing for ${symbol}`);
     const { qtyStep, minQty, priceStep } = parseFilters(sym);
 
     const riskUsdt = equity * (this.cfg.riskPercent / 100);
@@ -99,140 +94,101 @@ export class RiskManager {
       return;
     }
 
-    // Raw qty (in BASE asset) such that loss-at-SL ≈ riskUsdt.
     const rawQty = riskUsdt / stopDistance;
     const qty = roundStep(rawQty, qtyStep);
     if (qty < minQty) {
       await recordEvent("execution", "warn", "Computed qty below minQty; skipping", {
-        rawQty, qty, minQty,
+        rawQty, qty, minQty, symbol,
       });
       return;
     }
 
     const orderSide = signal.side === "LONG" ? "BUY" : "SELL";
     const exitSide = orderSide === "BUY" ? "SELL" : "BUY";
-    const clientId = `at-${signalRow.id}-${Date.now().toString(36)}`;
+    const clientPrefix = `at-${signalRowId ?? "sig"}-${Date.now().toString(36)}`;
 
-    // 1) Entry MARKET order
+    // 1) Entry MARKET
     const entryResp = await this.client.placeOrder({
-      symbol: this.cfg.symbol,
-      side: orderSide,
-      type: "MARKET",
-      quantity: qty,
-      newClientOrderId: `${clientId}-e`,
+      symbol, side: orderSide, type: "MARKET", quantity: qty,
+      newClientOrderId: `${clientPrefix}-e`,
     });
-
     await prisma.order.create({
       data: {
         exchangeOrderId: String(entryResp.orderId ?? ""),
-        clientOrderId: `${clientId}-e`,
-        symbol: this.cfg.symbol,
-        side: orderSide,
-        type: "MARKET",
+        clientOrderId: `${clientPrefix}-e`,
+        symbol, side: orderSide, type: "MARKET",
         status: String(entryResp.status ?? "NEW"),
-        quantity: qty,
-        signalId: signalRow.id,
+        quantity: qty, signalId: signalRowId ?? null,
         rawResponse: JSON.stringify(entryResp),
       },
     });
 
-    // 2) Stop-loss (STOP_MARKET, closePosition=true)
+    // 2) Stop-loss (STOP_MARKET, closePosition)
     const slPrice = roundStep(signal.stopLoss, priceStep);
     const slResp = await this.client.placeOrder({
-      symbol: this.cfg.symbol,
-      side: exitSide,
-      type: "STOP_MARKET",
-      stopPrice: slPrice,
-      closePosition: true,
-      workingType: "MARK_PRICE",
-      newClientOrderId: `${clientId}-sl`,
+      symbol, side: exitSide, type: "STOP_MARKET",
+      stopPrice: slPrice, closePosition: true, workingType: "MARK_PRICE",
+      newClientOrderId: `${clientPrefix}-sl`,
     });
     await prisma.order.create({
       data: {
         exchangeOrderId: String(slResp.orderId ?? ""),
-        clientOrderId: `${clientId}-sl`,
-        symbol: this.cfg.symbol,
-        side: exitSide,
-        type: "STOP_MARKET",
+        clientOrderId: `${clientPrefix}-sl`,
+        symbol, side: exitSide, type: "STOP_MARKET",
         status: String(slResp.status ?? "NEW"),
-        stopPrice: slPrice,
-        quantity: qty,
-        closePosition: true,
-        signalId: signalRow.id,
+        stopPrice: slPrice, quantity: qty, closePosition: true,
+        signalId: signalRowId ?? null,
         rawResponse: JSON.stringify(slResp),
       },
     });
 
-    // 3) Take-profit (TAKE_PROFIT_MARKET, closePosition=true)
+    // 3) Take-profit (TAKE_PROFIT_MARKET, closePosition)
     const tpPrice = roundStep(signal.takeProfit, priceStep);
     const tpResp = await this.client.placeOrder({
-      symbol: this.cfg.symbol,
-      side: exitSide,
-      type: "TAKE_PROFIT_MARKET",
-      stopPrice: tpPrice,
-      closePosition: true,
-      workingType: "MARK_PRICE",
-      newClientOrderId: `${clientId}-tp`,
+      symbol, side: exitSide, type: "TAKE_PROFIT_MARKET",
+      stopPrice: tpPrice, closePosition: true, workingType: "MARK_PRICE",
+      newClientOrderId: `${clientPrefix}-tp`,
     });
     await prisma.order.create({
       data: {
         exchangeOrderId: String(tpResp.orderId ?? ""),
-        clientOrderId: `${clientId}-tp`,
-        symbol: this.cfg.symbol,
-        side: exitSide,
-        type: "TAKE_PROFIT_MARKET",
+        clientOrderId: `${clientPrefix}-tp`,
+        symbol, side: exitSide, type: "TAKE_PROFIT_MARKET",
         status: String(tpResp.status ?? "NEW"),
-        stopPrice: tpPrice,
-        quantity: qty,
-        closePosition: true,
-        signalId: signalRow.id,
+        stopPrice: tpPrice, quantity: qty, closePosition: true,
+        signalId: signalRowId ?? null,
         rawResponse: JSON.stringify(tpResp),
       },
     });
 
-    // Open position row (entry price is approximate until we fetch fills).
     await prisma.position.upsert({
-      where: { symbol: this.cfg.symbol },
+      where: { symbol },
       create: {
-        symbol: this.cfg.symbol,
-        side: signal.side,
-        entryPrice: signal.entryPrice,
-        quantity: qty,
-        leverage: this.cfg.leverage,
-        stopLoss: slPrice,
-        takeProfit: tpPrice,
+        symbol, side: signal.side, entryPrice: signal.entryPrice, quantity: qty,
+        leverage: this.cfg.leverage, stopLoss: slPrice, takeProfit: tpPrice,
+        signalId: signalRowId ?? null,
       },
       update: {
-        side: signal.side,
-        entryPrice: signal.entryPrice,
-        quantity: qty,
-        leverage: this.cfg.leverage,
-        stopLoss: slPrice,
-        takeProfit: tpPrice,
+        side: signal.side, entryPrice: signal.entryPrice, quantity: qty,
+        leverage: this.cfg.leverage, stopLoss: slPrice, takeProfit: tpPrice,
+        signalId: signalRowId ?? null,
       },
     });
 
-    await prisma.signal.update({ where: { id: signalRow.id }, data: { consumed: true } });
+    if (signalRowId) {
+      await prisma.signal.update({ where: { id: signalRowId }, data: { consumed: true } });
+    }
 
     await recordEvent("execution", "info", "Bracket order placed", {
-      signalId: signalRow.id,
-      symbol: this.cfg.symbol,
-      side: signal.side,
-      qty,
-      entry: signal.entryPrice,
-      sl: slPrice,
-      tp: tpPrice,
+      signalId: signalRowId, symbol, side: signal.side, qty,
+      entry: signal.entryPrice, sl: slPrice, tp: tpPrice,
     });
   }
 }
 
 // ----- filter parsing -----------------------------------------------------
 
-interface ParsedFilters {
-  qtyStep: number;
-  minQty: number;
-  priceStep: number;
-}
+interface ParsedFilters { qtyStep: number; minQty: number; priceStep: number; }
 
 function parseFilters(sym: Record<string, unknown>): ParsedFilters {
   const arr = (sym.filters as Array<Record<string, unknown>>) ?? [];
@@ -246,8 +202,6 @@ function parseFilters(sym: Record<string, unknown>): ParsedFilters {
   };
 }
 
-/** Round a number DOWN to the nearest multiple of `step`. Binance rejects
- *  orders whose qty/price isn't a multiple of the filter step. */
 function roundStep(n: number, step: number): number {
   if (step <= 0) return n;
   const decimals = (step.toString().split(".")[1] ?? "").length;

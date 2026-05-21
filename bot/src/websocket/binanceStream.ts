@@ -1,18 +1,20 @@
 // ============================================================================
-// binanceStream.ts — Binance Futures K-Line WebSocket consumer.
+// binanceStream.ts — Binance Futures K-Line WebSocket consumer (multi-symbol).
 // ----------------------------------------------------------------------------
-// Subscribes to `<symbol>@kline_<interval>` streams. Emits two event types:
-//   - 'tick'     — every incoming K-Line update (open candle), high-frequency
-//   - 'candle'   — only when a candle finalizes (kline.x === true)
+// Uses Binance's COMBINED-STREAM endpoint:
+//   wss://<host>/stream?streams=btcusdt@kline_15m/ethusdt@kline_15m/...
+// One TCP socket carries all subscriptions, which is dramatically lighter on
+// a small VPS than opening N separate sockets.
 //
-// Robustness features:
+// Events emitted:
+//   'tick'   — every K-Line update (including the still-open candle)
+//   'candle' — when a candle finalizes for a given symbol (k.x === true).
+//              The event payload is (symbol, candle, all_candles_for_symbol).
+//
+// Robustness:
 //   - Exponential backoff on disconnect (1s → 30s cap)
-//   - Heartbeat watchdog: forces reconnect if no data for >90s
+//   - Heartbeat watchdog: forces reconnect if no data for >90s on any stream
 //   - Backoff resets after 60s of stable connection
-//   - Graceful close on SIGINT/SIGTERM via close()
-//
-// Per Binance docs, WS connections are valid for 24h and may be closed by the
-// server; the reconnect logic handles that automatically.
 // ============================================================================
 
 import { EventEmitter } from "node:events";
@@ -23,38 +25,34 @@ import type { Candle } from "../shared/types.js";
 
 interface KlinePayload {
   e: "kline";
-  E: number;            // event time
-  s: string;            // symbol
+  E: number;
+  s: string;
   k: {
-    t: number;          // start time
-    T: number;          // close time
-    s: string;          // symbol
-    i: string;          // interval
-    f: number;          // first trade id
-    L: number;          // last trade id
-    o: string;          // open
-    c: string;          // close
-    h: string;          // high
-    l: string;          // low
-    v: string;          // base asset volume
-    n: number;          // trade count
-    x: boolean;         // is this kline closed?
-    q: string;          // quote asset volume
-    V: string;          // taker buy base
-    Q: string;          // taker buy quote
+    t: number; T: number; s: string; i: string;
+    o: string; c: string; h: string; l: string; v: string;
+    n: number; x: boolean; q: string;
   };
 }
 
+interface CombinedEnvelope {
+  stream: string;     // e.g. "btcusdt@kline_15m"
+  data: KlinePayload;
+}
+
+export interface Subscription {
+  symbol: string;     // "BTCUSDT"
+  interval: string;   // "15m"
+}
+
 export interface BinanceStreamOptions {
-  symbol: string;       // e.g. "BTCUSDT"
-  interval: string;     // e.g. "15m"
-  /** Optional: max candles retained in the in-memory buffer (default 500). */
+  subscriptions: Subscription[];
+  /** Max candles retained in-memory per symbol (default 500). */
   bufferSize?: number;
 }
 
 export declare interface BinanceStream {
-  on(event: "candle", listener: (candle: Candle, all: Candle[]) => void): this;
-  on(event: "tick", listener: (candle: Candle) => void): this;
+  on(event: "candle", listener: (symbol: string, candle: Candle, all: Candle[]) => void): this;
+  on(event: "tick", listener: (symbol: string, candle: Candle) => void): this;
   on(event: "open", listener: () => void): this;
   on(event: "close", listener: (code: number, reason: string) => void): this;
   on(event: "error", listener: (err: Error) => void): this;
@@ -62,7 +60,8 @@ export declare interface BinanceStream {
 
 export class BinanceStream extends EventEmitter {
   private ws?: WebSocket;
-  private buffer: Candle[] = [];
+  /** symbol → ordered candle buffer */
+  private buffers = new Map<string, Candle[]>();
   private reconnectAttempts = 0;
   private stableTimer?: NodeJS.Timeout;
   private watchdogTimer?: NodeJS.Timeout;
@@ -75,16 +74,20 @@ export class BinanceStream extends EventEmitter {
 
   constructor(private readonly opts: BinanceStreamOptions) {
     super();
+    for (const sub of opts.subscriptions) {
+      this.buffers.set(sub.symbol.toUpperCase(), []);
+    }
   }
 
-  /** Open the connection. Idempotent: returns silently if already connected. */
   connect(): void {
     if (this.ws && this.ws.readyState <= WebSocket.OPEN) return;
     this.closedByUser = false;
 
-    const stream = `${this.opts.symbol.toLowerCase()}@kline_${this.opts.interval}`;
-    const url = `${BINANCE_ENDPOINTS.ws}/${stream}`;
-    logger.info({ url }, "Connecting Binance K-Line stream");
+    const streams = this.opts.subscriptions
+      .map((s) => `${s.symbol.toLowerCase()}@kline_${s.interval}`)
+      .join("/");
+    const url = `${BINANCE_ENDPOINTS.ws}/stream?streams=${streams}`;
+    logger.info({ count: this.opts.subscriptions.length }, "Connecting combined K-Line stream");
 
     const ws = new WebSocket(url);
     this.ws = ws;
@@ -94,33 +97,29 @@ export class BinanceStream extends EventEmitter {
       this.armWatchdog();
       this.armStableTimer();
       this.emit("open");
-      logger.info({ stream }, "WS open");
+      logger.info({ streams: this.opts.subscriptions.length }, "WS open");
     });
 
     ws.on("message", (raw) => {
       this.lastMessageAt = Date.now();
       try {
-        const data = JSON.parse(raw.toString()) as KlinePayload;
-        if (data.e !== "kline") return;
-        const c = this.toCandle(data);
-        this.upsertBuffer(c);
-        this.emit("tick", c);
-        if (c.isClosed) this.emit("candle", c, [...this.buffer]);
+        const env = JSON.parse(raw.toString()) as CombinedEnvelope;
+        if (!env.data || env.data.e !== "kline") return;
+        const symbol = env.data.s.toUpperCase();
+        const c = this.toCandle(env.data);
+        this.upsertBuffer(symbol, c);
+        this.emit("tick", symbol, c);
+        if (c.isClosed) this.emit("candle", symbol, c, [...(this.buffers.get(symbol) ?? [])]);
       } catch (err) {
         logger.warn({ err }, "Malformed WS message");
       }
     });
 
-    ws.on("ping", (data) => {
-      // `ws` auto-replies with pong, but we explicitly pong with the same
-      // payload to be safe across server expectations.
-      try { ws.pong(data); } catch { /* socket may already be closing */ }
-    });
+    ws.on("ping", (data) => { try { ws.pong(data); } catch { /* noop */ } });
 
     ws.on("error", (err) => {
       logger.error({ err: err.message }, "WS error");
       this.emit("error", err);
-      // 'close' will fire next; reconnect is handled there.
     });
 
     ws.on("close", (code, reasonBuf) => {
@@ -133,7 +132,6 @@ export class BinanceStream extends EventEmitter {
     });
   }
 
-  /** Gracefully close. The stream will not auto-reconnect after this. */
   close(): void {
     this.closedByUser = true;
     this.clearWatchdog();
@@ -144,9 +142,14 @@ export class BinanceStream extends EventEmitter {
     }
   }
 
-  /** Current in-memory candle buffer (oldest first). */
-  candles(): Candle[] {
-    return this.buffer;
+  /** Returns the in-memory candle buffer for a symbol (oldest first). */
+  candlesFor(symbol: string): Candle[] {
+    return this.buffers.get(symbol.toUpperCase()) ?? [];
+  }
+
+  /** All tracked symbols. */
+  symbols(): string[] {
+    return Array.from(this.buffers.keys());
   }
 
   // ----- internals --------------------------------------------------------
@@ -173,52 +176,37 @@ export class BinanceStream extends EventEmitter {
   }
 
   private clearWatchdog(): void {
-    if (this.watchdogTimer) {
-      clearInterval(this.watchdogTimer);
-      this.watchdogTimer = undefined;
-    }
+    if (this.watchdogTimer) { clearInterval(this.watchdogTimer); this.watchdogTimer = undefined; }
   }
 
   private armStableTimer(): void {
     this.clearStableTimer();
-    this.stableTimer = setTimeout(() => {
-      // After STABLE_AFTER_MS without disconnect, reset the backoff counter.
-      this.reconnectAttempts = 0;
-    }, BinanceStream.STABLE_AFTER_MS);
+    this.stableTimer = setTimeout(() => { this.reconnectAttempts = 0; }, BinanceStream.STABLE_AFTER_MS);
   }
 
   private clearStableTimer(): void {
-    if (this.stableTimer) {
-      clearTimeout(this.stableTimer);
-      this.stableTimer = undefined;
-    }
+    if (this.stableTimer) { clearTimeout(this.stableTimer); this.stableTimer = undefined; }
   }
 
   private toCandle(msg: KlinePayload): Candle {
     const k = msg.k;
     return {
-      openTime: k.t,
-      closeTime: k.T,
-      open: Number(k.o),
-      high: Number(k.h),
-      low: Number(k.l),
-      close: Number(k.c),
-      volume: Number(k.v),
-      isClosed: k.x,
+      openTime: k.t, closeTime: k.T,
+      open: Number(k.o), high: Number(k.h), low: Number(k.l), close: Number(k.c),
+      volume: Number(k.v), isClosed: k.x,
     };
   }
 
-  /** Replace the current (open) candle in-place; append on roll-over. */
-  private upsertBuffer(c: Candle): void {
-    const last = this.buffer.at(-1);
+  private upsertBuffer(symbol: string, c: Candle): void {
+    let buf = this.buffers.get(symbol);
+    if (!buf) { buf = []; this.buffers.set(symbol, buf); }
+    const last = buf.at(-1);
     if (last && last.openTime === c.openTime) {
-      this.buffer[this.buffer.length - 1] = c;
+      buf[buf.length - 1] = c;
     } else {
-      this.buffer.push(c);
+      buf.push(c);
       const max = this.opts.bufferSize ?? 500;
-      if (this.buffer.length > max) {
-        this.buffer.splice(0, this.buffer.length - max);
-      }
+      if (buf.length > max) buf.splice(0, buf.length - max);
     }
   }
 }
