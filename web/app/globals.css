@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+
+.card {
+  @apply bg-panel border border-line rounded-xl p-4;
+}
+
+.kv {
+  @apply flex justify-between text-sm py-1;
+}
+
+.kv > span:first-child { @apply text-slate-400; }
+.kv > span:last-child  { @apply text-slate-100 font-mono; }
+
+.btn {
+  @apply px-3 py-1.5 rounded-md bg-accent hover:bg-blue-500 text-white text-sm transition;
+}

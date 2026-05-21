@@ -1,0 +1,38 @@
+{
+  "name": "autotrade",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted SMC/ICT auto-trading bot + dashboard for Binance Futures",
+  "workspaces": [
+    "bot",
+    "web"
+  ],
+  "scripts": {
+    "prisma:generate": "prisma generate --schema=./prisma/schema.prisma",
+    "prisma:migrate": "prisma migrate dev --schema=./prisma/schema.prisma",
+    "prisma:deploy": "prisma migrate deploy --schema=./prisma/schema.prisma",
+    "prisma:studio": "prisma studio --schema=./prisma/schema.prisma",
+    "bot:dev": "npm --workspace bot run dev",
+    "bot:build": "npm --workspace bot run build",
+    "bot:start": "npm --workspace bot run start",
+    "web:dev": "npm --workspace web run dev",
+    "web:build": "npm --workspace web run build",
+    "web:start": "npm --workspace web run start",
+    "build": "npm run prisma:generate && npm run bot:build && npm run web:build",
+    "keygen": "node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\"",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:reload": "pm2 reload ecosystem.config.js",
+    "pm2:logs": "pm2 logs",
+    "pm2:status": "pm2 status"
+  },
+  "devDependencies": {
+    "prisma": "^5.20.0",
+    "typescript": "^5.6.2"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.20.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

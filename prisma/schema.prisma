@@ -1,0 +1,161 @@
+// ============================================================================
+// AUTOTRADE — Prisma schema
+// ----------------------------------------------------------------------------
+// Default provider is SQLite (single file, low-RAM friendly for small VPS).
+// To switch to MySQL: change `provider = "mysql"` and update DATABASE_URL.
+// All `String?` fields holding JSON are stored as TEXT to keep the schema
+// portable across SQLite/MySQL.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// BotConfig
+// API credentials are NEVER stored in plain text. They are AES-256-GCM
+// encrypted at the application layer (see bot/src/shared/crypto.ts). For each
+// secret we persist three components: ciphertext, iv, authTag.
+// ----------------------------------------------------------------------------
+model BotConfig {
+  id              Int      @id @default(autoincrement())
+  label           String   @unique               // e.g. "binance-futures-testnet"
+  exchange        String   @default("BINANCE_FUTURES")
+  testnet         Boolean  @default(true)
+
+  apiKeyCipher    String                          // base64 ciphertext
+  apiKeyIv        String                          // base64 12-byte IV
+  apiKeyTag       String                          // base64 16-byte auth tag
+
+  apiSecretCipher String
+  apiSecretIv     String
+  apiSecretTag    String
+
+  symbol          String   @default("BTCUSDT")
+  interval        String   @default("15m")
+  leverage        Int      @default(5)
+  marginType      String   @default("ISOLATED")   // ISOLATED | CROSSED
+  riskPercent     Float    @default(1.0)          // % of balance to risk per trade
+  maxConcurrent   Int      @default(1)            // max concurrent open positions
+  enabled         Boolean  @default(false)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ----------------------------------------------------------------------------
+// Signal — every SMC/ICT pattern the engine detects is recorded here, whether
+// or not it is acted upon. Useful for backtesting and audit.
+// ----------------------------------------------------------------------------
+model Signal {
+  id          Int      @id @default(autoincrement())
+  symbol      String
+  interval    String
+  side        String   // LONG | SHORT
+  kind        String   // BOS_LONG | CHOCH_SHORT | OB_TAP_LONG | FVG_TAP_SHORT | ...
+  price       Float
+  stopLoss    Float?
+  takeProfit  Float?
+  confidence  Float    @default(0)   // 0..1, engine's own scoring
+  payload     String?                // JSON: { ob, fvg, structure, ... }
+  consumed    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  orders      Order[]
+  trades      Trade[]
+
+  @@index([symbol, createdAt])
+  @@index([consumed])
+}
+
+// ----------------------------------------------------------------------------
+// Order — every order sent to (and acknowledged by) the exchange.
+// ----------------------------------------------------------------------------
+model Order {
+  id              Int      @id @default(autoincrement())
+  exchangeOrderId String?  @unique
+  clientOrderId   String?  @unique
+  symbol          String
+  side            String                            // BUY | SELL
+  positionSide    String   @default("BOTH")         // LONG | SHORT | BOTH (one-way mode)
+  type            String                            // MARKET | LIMIT | STOP_MARKET | TAKE_PROFIT_MARKET
+  status          String                            // NEW | FILLED | PARTIALLY_FILLED | CANCELED | REJECTED | EXPIRED
+  price           Float?
+  stopPrice       Float?
+  quantity        Float
+  reduceOnly      Boolean  @default(false)
+  closePosition   Boolean  @default(false)
+  rawResponse     String?                           // JSON of exchange response
+
+  signal          Signal?  @relation(fields: [signalId], references: [id])
+  signalId        Int?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([symbol, status])
+  @@index([createdAt])
+}
+
+// ----------------------------------------------------------------------------
+// Trade — a fully-realized trade lifecycle (entry → exit).
+// ----------------------------------------------------------------------------
+model Trade {
+  id            Int       @id @default(autoincrement())
+  symbol        String
+  side          String                              // LONG | SHORT
+  entryPrice    Float
+  exitPrice     Float?
+  quantity      Float
+  leverage      Int
+  pnl           Float?                              // USDT realized PnL
+  pnlPercent    Float?
+  reason        String?                             // TP | SL | MANUAL | LIQUIDATION
+  openedAt      DateTime  @default(now())
+  closedAt      DateTime?
+
+  signal        Signal?   @relation(fields: [signalId], references: [id])
+  signalId      Int?
+
+  @@index([symbol, openedAt])
+  @@index([closedAt])
+}
+
+// ----------------------------------------------------------------------------
+// Position — current open position(s). For one-way mode there is at most one
+// row per symbol; for hedge mode you would extend the unique key to (symbol, side).
+// ----------------------------------------------------------------------------
+model Position {
+  id            Int      @id @default(autoincrement())
+  symbol        String   @unique
+  side          String                              // LONG | SHORT
+  entryPrice    Float
+  quantity      Float
+  leverage      Int
+  stopLoss      Float?
+  takeProfit    Float?
+  unrealizedPnl Float    @default(0)
+  openedAt      DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// ----------------------------------------------------------------------------
+// EventLog — structured engine events (separate from pino file logs; this is
+// what the dashboard reads).
+// ----------------------------------------------------------------------------
+model EventLog {
+  id        Int      @id @default(autoincrement())
+  level     String                                  // info | warn | error
+  source    String                                  // websocket | strategy | execution | api
+  message   String
+  meta      String?                                 // JSON
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([level, source])
+}
