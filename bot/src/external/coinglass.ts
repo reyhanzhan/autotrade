@@ -145,7 +145,7 @@ export class CoinglassClient {
     try {
       const r = await this.http.get(`/api/futures/longShort/topPositionRatio?symbol=${base}&exchangeName=Binance&interval=h1&limit=1`);
       const data = unwrap(r.data);
-      const arr = Array.isArray(data) ? data : (data?.list ?? data?.data ?? []);
+      const arr = Array.isArray(data) ? data : ((data as Record<string, unknown>)?.list as unknown[] ?? (data as Record<string, unknown>)?.data as unknown[] ?? []);
       const latest = arr.at?.(-1) ?? arr[0];
       if (latest) {
         if (typeof latest.longShortRatio === "number") return latest.longShortRatio;

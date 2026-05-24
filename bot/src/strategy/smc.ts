@@ -81,7 +81,7 @@ export class SMCEngine {
     const ob = nearestUnmitigatedOB(obs, side);
     const fvg = nearestUnfilledFVG(gaps, side);
 
-    const lastClosed = candles.findLast((c) => c.isClosed) ?? candles.at(-1)!;
+    const lastClosed = candles.findLast((c: Candle) => c.isClosed) ?? candles.at(-1)!;
     const lastPrice = lastClosed.close;
 
     // Pick the entry zone: prefer OB; fall back to FVG. Both must sit between

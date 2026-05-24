@@ -143,8 +143,8 @@ export class Screener {
         interval: this.opts.interval,
         symbolsScanned: symbolsJson,
         candidateCount: scored.length,
-        selectedSymbol: winner?.finalConfidence >= this.opts.minConfidence ? winner.sym : null,
-        selectedSide: winner?.finalConfidence >= this.opts.minConfidence ? winner.candidate.signal.side : null,
+        selectedSymbol: winner && winner.finalConfidence >= this.opts.minConfidence ? winner.sym : null,
+        selectedSide: winner && winner.finalConfidence >= this.opts.minConfidence ? winner.candidate.signal.side : null,
         bestConfidence: winner?.finalConfidence ?? null,
         reason: winner
           ? winner.finalConfidence >= this.opts.minConfidence
