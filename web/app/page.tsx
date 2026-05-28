@@ -1,82 +1,190 @@
 // ============================================================================
-// app/page.tsx — Server-rendered dashboard.
-// Shows: active config, multi-symbol watchlist, live positions, recent signals,
-// recent screening runs, and latest engine events. Links to /reports.
+// app/page.tsx — Dashboard.
+// Hero: wallet balance + 24h Δ + equity sparkline + today's PnL + win-rate.
+// Below: watchlist, open positions, recent signals, screening runs, events.
 // ============================================================================
 
 import Link from "next/link";
 import { prisma } from "@/lib/db";
+import { Card } from "@/components/Card";
+import { StatTile } from "@/components/StatTile";
+import { Sparkline } from "@/components/Sparkline";
 
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
-  const [cfg, positions, recentSignals, recentRuns, recentEvents] = await Promise.all([
+  const since30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const startOfDay = new Date(); startOfDay.setUTCHours(0, 0, 0, 0);
+
+  const [cfg, positions, recentSignals, recentRuns, recentEvents,
+         latestBalance, balance24hAgo, balanceHistory,
+         todaysClosed, last30dClosed] = await Promise.all([
     prisma.botConfig.findFirst({ where: { enabled: true } }),
     prisma.position.findMany({ orderBy: { openedAt: "desc" } }),
-    prisma.signal.findMany({ orderBy: { createdAt: "desc" }, take: 12 }),
+    prisma.signal.findMany({ orderBy: { createdAt: "desc" }, take: 10 }),
     prisma.screeningRun.findMany({ orderBy: { runAt: "desc" }, take: 5 }),
-    prisma.eventLog.findMany({ orderBy: { createdAt: "desc" }, take: 15 }),
+    prisma.eventLog.findMany({ orderBy: { createdAt: "desc" }, take: 12 }),
+    prisma.balanceSnapshot.findFirst({ orderBy: { capturedAt: "desc" } }),
+    prisma.balanceSnapshot.findFirst({
+      where: { capturedAt: { lte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+      orderBy: { capturedAt: "desc" },
+    }),
+    prisma.balanceSnapshot.findMany({ orderBy: { capturedAt: "desc" }, take: 200 }),
+    prisma.trade.findMany({
+      where: { closedAt: { gte: startOfDay }, pnl: { not: null } },
+      select: { pnl: true },
+    }),
+    prisma.trade.findMany({
+      where: { closedAt: { gte: since30d }, pnl: { not: null } },
+      select: { pnl: true },
+    }),
   ]);
 
   let watchlist: string[] = [];
   try { if (cfg?.watchlist) watchlist = JSON.parse(cfg.watchlist); } catch { /* noop */ }
 
+  // ----- hero stats -------------------------------------------------------
+  const wallet = latestBalance?.totalWalletBalance ?? 0;
+  const unrealized = latestBalance?.unrealizedProfit ?? 0;
+  const available = latestBalance?.availableBalance ?? 0;
+
+  const delta24h = latestBalance && balance24hAgo
+    ? latestBalance.totalWalletBalance - balance24hAgo.totalWalletBalance
+    : null;
+  const deltaPct24h = delta24h !== null && balance24hAgo && balance24hAgo.totalWalletBalance > 0
+    ? (delta24h / balance24hAgo.totalWalletBalance) * 100
+    : null;
+
+  const todayPnl = todaysClosed.reduce((s, t) => s + (t.pnl ?? 0), 0);
+  const monthPnl = last30dClosed.reduce((s, t) => s + (t.pnl ?? 0), 0);
+  const wins30d = last30dClosed.filter((t) => (t.pnl ?? 0) > 0).length;
+  const winRate30d = last30dClosed.length > 0 ? wins30d / last30dClosed.length : 0;
+
+  const sparkPoints = balanceHistory.slice().reverse().map((b) => b.totalWalletBalance);
+
   return (
     <main className="max-w-6xl mx-auto p-6 space-y-6">
-      <header className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold">AutoTrade — SMC/ICT</h1>
-          <p className="text-slate-400 text-sm">
-            {cfg
-              ? `${watchlist.length || 1} symbol${watchlist.length === 1 ? "" : "s"} · ${cfg.interval} · ${cfg.testnet ? "TESTNET" : "MAINNET"} · ${cfg.leverage}x ${cfg.marginType} · min conf ${cfg.minConfidence}`
-              : "No active config — POST /api/config to set credentials."}
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <Link href="/reports" className="text-sm text-accent hover:underline">Reports →</Link>
-          <div className={`text-sm px-3 py-1.5 rounded-md ${cfg?.enabled ? "bg-success/20 text-success" : "bg-slate-700 text-slate-300"}`}>
-            {cfg?.enabled ? "ENABLED" : "DISABLED"}
-          </div>
-        </div>
+      {/* Header */}
+      <header>
+        <h1 className="text-2xl font-semibold">Dashboard</h1>
+        <p className="text-slate-400 text-sm">
+          {cfg
+            ? `${watchlist.length} symbol${watchlist.length === 1 ? "" : "s"} · ${cfg.interval} · ${cfg.leverage}x ${cfg.marginType} · risk ${cfg.riskPercent}% · min conf ${cfg.minConfidence}`
+            : "No active config — POST /api/config first."}
+        </p>
       </header>
 
-      {/* Watchlist */}
-      <section className="card">
-        <h2 className="text-sm uppercase text-slate-400 mb-3">Watchlist (screener universe)</h2>
-        {watchlist.length === 0
-          ? <p className="text-slate-500 text-sm">No watchlist configured — using env default.</p>
-          : <div className="flex flex-wrap gap-2">
-              {watchlist.map((s) => (
-                <span key={s} className="px-2.5 py-1 rounded-md bg-muted text-slate-200 text-xs font-mono">{s}</span>
-              ))}
-            </div>}
+      {/* Hero balance + stats */}
+      <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <Card title="Wallet Balance" className="md:col-span-1">
+          {latestBalance ? (
+            <>
+              <p className="text-3xl font-mono font-semibold">{wallet.toFixed(2)} <span className="text-base text-slate-400">USDT</span></p>
+              <div className="text-xs text-slate-400 mt-1">
+                Available <span className="text-slate-200 font-mono">{available.toFixed(2)}</span>
+                <span className="mx-2">·</span>
+                uPnL <span className={`font-mono ${unrealized >= 0 ? "text-success" : "text-danger"}`}>{unrealized.toFixed(2)}</span>
+              </div>
+              {delta24h !== null && (
+                <div className="mt-2">
+                  <span className={delta24h >= 0 ? "pill-good" : "pill-bad"}>
+                    {delta24h >= 0 ? "▲" : "▼"} {delta24h.toFixed(2)} USDT
+                    {deltaPct24h !== null && ` (${deltaPct24h.toFixed(2)}%)`}
+                  </span>
+                  <span className="text-xs text-slate-500 ml-2">24h</span>
+                </div>
+              )}
+              <div className="mt-3">
+                <Sparkline points={sparkPoints} color="auto" width={280} height={56} />
+              </div>
+              <p className="text-[10px] text-slate-500 mt-1">
+                Last update: {new Date(latestBalance.capturedAt).toLocaleTimeString()} · {balanceHistory.length} snapshots
+              </p>
+            </>
+          ) : (
+            <div className="text-sm text-slate-500">
+              No balance snapshots yet. The bot polls Binance every 60s once it starts.
+            </div>
+          )}
+        </Card>
+
+        <div className="grid grid-cols-2 gap-4 md:col-span-2">
+          <StatTile
+            label="Today's PnL"
+            value={`${todayPnl >= 0 ? "+" : ""}${todayPnl.toFixed(2)}`}
+            sub={`${todaysClosed.length} trade${todaysClosed.length === 1 ? "" : "s"} today`}
+            tone={todayPnl >= 0 ? "good" : "bad"}
+          />
+          <StatTile
+            label="30-Day PnL"
+            value={`${monthPnl >= 0 ? "+" : ""}${monthPnl.toFixed(2)}`}
+            sub={`${last30dClosed.length} closed`}
+            tone={monthPnl >= 0 ? "good" : "bad"}
+          />
+          <StatTile
+            label="Win Rate (30d)"
+            value={`${(winRate30d * 100).toFixed(0)}%`}
+            sub={`${wins30d}/${last30dClosed.length}`}
+            tone={winRate30d >= 0.5 ? "good" : winRate30d >= 0.3 ? "warn" : "bad"}
+          />
+          <StatTile
+            label="Open Positions"
+            value={positions.length}
+            sub={positions.length > 0 ? positions.map((p) => p.symbol).join(", ") : "none"}
+            tone={positions.length > 0 ? "accent" : "neutral"}
+          />
+        </div>
       </section>
 
+      {/* Watchlist */}
+      <Card
+        title="Watchlist"
+        action={<Link href="/calendar" className="text-xs text-accent hover:underline">View PnL calendar →</Link>}
+      >
+        {watchlist.length === 0
+          ? <p className="text-slate-500 text-sm">No watchlist — using env default.</p>
+          : <div className="flex flex-wrap gap-2">
+              {watchlist.map((s) => {
+                const inPos = positions.find((p) => p.symbol === s);
+                return (
+                  <span
+                    key={s}
+                    className={`pill ${inPos ? (inPos.side === "LONG" ? "pill-good" : "pill-bad") : "pill-neut"}`}
+                  >
+                    {s}{inPos ? ` · ${inPos.side}` : ""}
+                  </span>
+                );
+              })}
+            </div>}
+      </Card>
+
+      {/* Positions + signals */}
       <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="card">
-          <h2 className="text-sm uppercase text-slate-400 mb-3">Open positions</h2>
+        <Card title="Open Positions" className="md:col-span-1">
           {positions.length === 0
             ? <p className="text-slate-500 text-sm">No active positions.</p>
             : positions.map((p) => (
                 <div key={p.id} className="border-b border-line py-2 last:border-0">
-                  <div className="kv"><span>Symbol</span><span>{p.symbol}</span></div>
-                  <div className="kv"><span>Side</span><span className={p.side === "LONG" ? "text-success" : "text-danger"}>{p.side}</span></div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-mono">{p.symbol}</span>
+                    <span className={p.side === "LONG" ? "pill-good" : "pill-bad"}>{p.side}</span>
+                  </div>
                   <div className="kv"><span>Entry</span><span>{p.entryPrice.toFixed(4)}</span></div>
                   <div className="kv"><span>Qty</span><span>{p.quantity}</span></div>
-                  <div className="kv"><span>uPnL</span><span className={p.unrealizedPnl >= 0 ? "text-success" : "text-danger"}>{p.unrealizedPnl.toFixed(2)}</span></div>
-                  <div className="kv"><span>SL / TP</span><span>{p.stopLoss?.toFixed(4)} / {p.takeProfit?.toFixed(4)}</span></div>
+                  <div className="kv">
+                    <span>uPnL</span>
+                    <span className={p.unrealizedPnl >= 0 ? "text-success" : "text-danger"}>{p.unrealizedPnl.toFixed(2)}</span>
+                  </div>
+                  <div className="kv"><span>SL · TP</span><span>{p.stopLoss?.toFixed(4)} · {p.takeProfit?.toFixed(4)}</span></div>
                 </div>
               ))}
-        </div>
+        </Card>
 
-        <div className="card md:col-span-2">
-          <h2 className="text-sm uppercase text-slate-400 mb-3">Recent signals (across all symbols)</h2>
-          <table className="w-full text-sm">
-            <thead className="text-slate-400">
+        <Card title="Recent Signals (all symbols)" className="md:col-span-2">
+          <table className="t">
+            <thead>
               <tr>
-                <th className="text-left">When</th>
-                <th className="text-left">Symbol</th>
-                <th className="text-left">Pattern</th>
+                <th>Time</th><th>Symbol</th><th>Pattern</th>
                 <th className="text-right">SMC</th>
                 <th className="text-right">×CG</th>
                 <th className="text-right">Final</th>
@@ -85,52 +193,54 @@ export default async function DashboardPage() {
             </thead>
             <tbody>
               {recentSignals.map((s) => (
-                <tr key={s.id} className="border-t border-line">
-                  <td className="py-1.5 text-slate-300">{new Date(s.createdAt).toLocaleString()}</td>
+                <tr key={s.id}>
+                  <td className="text-slate-400 text-xs">{new Date(s.createdAt).toLocaleTimeString()}</td>
                   <td className="font-mono">{s.symbol}</td>
-                  <td className={s.side === "LONG" ? "text-success" : "text-danger"}>{s.kind}</td>
+                  <td><span className={s.side === "LONG" ? "pill-good" : "pill-bad"}>{s.kind}</span></td>
                   <td className="text-right font-mono">{(s.baseConfidence * 100).toFixed(0)}%</td>
-                  <td className="text-right font-mono">{s.coinglassScore?.toFixed(2) ?? "—"}</td>
+                  <td className="text-right font-mono text-slate-400">{s.coinglassScore?.toFixed(2) ?? "—"}</td>
                   <td className="text-right font-mono font-bold">{(s.confidence * 100).toFixed(0)}%</td>
-                  <td className="text-right">{s.consumed ? "✓" : "—"}</td>
+                  <td className="text-right">{s.consumed ? <span className="text-success">●</span> : <span className="text-slate-600">○</span>}</td>
                 </tr>
               ))}
               {recentSignals.length === 0 && (
-                <tr><td colSpan={7} className="text-slate-500 py-2">No signals yet.</td></tr>
+                <tr><td colSpan={7} className="text-slate-500 py-3">No signals yet.</td></tr>
               )}
             </tbody>
           </table>
-        </div>
+        </Card>
       </section>
 
+      {/* Screening + events */}
       <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="card">
-          <h2 className="text-sm uppercase text-slate-400 mb-3">Recent screening runs</h2>
+        <Card
+          title="Recent Screening Runs"
+          action={<Link href="/reports" className="text-xs text-accent hover:underline">All runs →</Link>}
+        >
           {recentRuns.length === 0
             ? <p className="text-slate-500 text-sm">No screening runs yet.</p>
             : recentRuns.map((r) => (
-                <div key={r.id} className="border-b border-line py-2 last:border-0 text-sm">
-                  <div className="flex items-center justify-between">
+                <div key={r.id} className="border-b border-line py-2 last:border-0">
+                  <div className="flex items-center justify-between text-sm">
                     <span className="text-slate-300">{new Date(r.runAt).toLocaleString()}</span>
                     <span className="text-xs text-slate-500">{r.candidateCount} candidates</span>
                   </div>
                   <div className="text-xs mt-1">
                     {r.selectedSymbol
-                      ? <span className={r.selectedSide === "LONG" ? "text-success" : "text-danger"}>{r.selectedSymbol} {r.selectedSide} @ {r.bestConfidence?.toFixed(2)}</span>
-                      : <span className="text-slate-500">No execution</span>}
+                      ? <span className={r.selectedSide === "LONG" ? "text-success" : "text-danger"}>
+                          ✓ {r.selectedSymbol} {r.selectedSide} @ {r.bestConfidence?.toFixed(2)}
+                        </span>
+                      : <span className="text-slate-500">No execution{r.bestConfidence != null ? ` · best ${r.bestConfidence.toFixed(2)}` : ""}</span>}
                   </div>
                 </div>
               ))}
-          <Link href="/reports" className="text-xs text-accent hover:underline mt-3 inline-block">View full screening history →</Link>
-        </div>
+        </Card>
 
-        <div className="card">
-          <h2 className="text-sm uppercase text-slate-400 mb-3">Engine events</h2>
-          <ul className="text-sm space-y-1 max-h-72 overflow-auto">
+        <Card title="Engine Events">
+          <ul className="text-sm space-y-1 max-h-72 overflow-auto font-mono">
             {recentEvents.map((e) => (
-              <li key={e.id} className="font-mono">
-                <span className="text-slate-500">{new Date(e.createdAt).toLocaleTimeString()}</span>
-                {" "}
+              <li key={e.id} className="text-xs">
+                <span className="text-slate-600">{new Date(e.createdAt).toLocaleTimeString()}</span>{" "}
                 <span className={e.level === "error" ? "text-danger" : e.level === "warn" ? "text-yellow-400" : "text-slate-300"}>
                   [{e.source}] {e.message}
                 </span>
@@ -138,7 +248,7 @@ export default async function DashboardPage() {
             ))}
             {recentEvents.length === 0 && <li className="text-slate-500">No events yet.</li>}
           </ul>
-        </div>
+        </Card>
       </section>
     </main>
   );

@@ -1,18 +1,18 @@
 // ============================================================================
 // /reports — Performance report page.
 // ----------------------------------------------------------------------------
-// Two sections:
-//   1. Trade outcomes — overall stats, per-symbol PnL, per-pattern win rate,
-//      Coinglass attribution (does confluence actually help?).
-//   2. Screening history — every multi-symbol scan: what was looked at,
-//      what was picked, what the candidates scored.
-//
-// Server-rendered. Uses Prisma directly. For a richer chart UI you can swap
-// the equity curve table for a `<canvas>` rendered with Chart.js or similar.
+// Sections:
+//   - Hero stats (Total PnL, Win rate, Profit factor, etc.)
+//   - PnL by symbol
+//   - PnL by SMC pattern
+//   - Coinglass attribution (avg ×multiplier on wins vs losses)
+//   - Recent closed trades
+//   - Screening history (what was scanned / picked / why)
 // ============================================================================
 
-import Link from "next/link";
 import { prisma } from "@/lib/db";
+import { Card } from "@/components/Card";
+import { StatTile } from "@/components/StatTile";
 
 export const dynamic = "force-dynamic";
 
@@ -57,87 +57,71 @@ export default async function ReportsPage() {
 
   return (
     <main className="max-w-6xl mx-auto p-6 space-y-6">
-      <header className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold">Performance Report</h1>
-          <p className="text-slate-400 text-sm">Last 30 days · {closed.length} closed trades · {snapshotCount} Coinglass snapshots</p>
-        </div>
-        <Link href="/" className="text-sm text-accent hover:underline">← Dashboard</Link>
+      <header>
+        <h1 className="text-2xl font-semibold">Reports</h1>
+        <p className="text-slate-400 text-sm">Last 30 days · {closed.length} closed trades · {snapshotCount} Coinglass snapshots</p>
       </header>
 
-      {/* ---- Overall ---- */}
       <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
-        <StatCard label="Total PnL"     value={`${totalPnl.toFixed(2)} USDT`} tone={totalPnl >= 0 ? "good" : "bad"} />
-        <StatCard label="Win rate"      value={`${(winRate * 100).toFixed(1)}%`}  tone={winRate >= 0.5 ? "good" : "warn"} />
-        <StatCard label="Profit factor" value={profitFactor ? profitFactor.toFixed(2) : "—"} tone={(profitFactor ?? 0) >= 1.5 ? "good" : "warn"} />
-        <StatCard label="Wins / Losses" value={`${wins.length} / ${losses.length}`} />
-        <StatCard label="Gross P/L"     value={`${grossProfit.toFixed(0)} / ${grossLoss.toFixed(0)}`} />
+        <StatTile label="Total PnL"     value={`${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}`} sub="USDT" tone={totalPnl >= 0 ? "good" : "bad"} />
+        <StatTile label="Win Rate"      value={`${(winRate * 100).toFixed(1)}%`}  sub={`${wins.length} / ${closed.length}`} tone={winRate >= 0.5 ? "good" : "warn"} />
+        <StatTile label="Profit Factor" value={profitFactor ? profitFactor.toFixed(2) : "—"} tone={(profitFactor ?? 0) >= 1.5 ? "good" : "warn"} />
+        <StatTile label="Gross Profit"  value={grossProfit.toFixed(0)} tone="good" />
+        <StatTile label="Gross Loss"    value={grossLoss.toFixed(0)} tone="bad" />
       </section>
 
-      {/* ---- Per-symbol ---- */}
-      <section className="card">
-        <h2 className="text-sm uppercase text-slate-400 mb-3">PnL by symbol</h2>
-        <table className="w-full text-sm">
-          <thead className="text-slate-400">
-            <tr><th className="text-left">Symbol</th><th className="text-right">Trades</th><th className="text-right">Win rate</th><th className="text-right">PnL (USDT)</th></tr>
-          </thead>
+      <Card title="PnL by Symbol">
+        <table className="t">
+          <thead><tr><th>Symbol</th><th className="text-right">Trades</th><th className="text-right">Win rate</th><th className="text-right">PnL</th></tr></thead>
           <tbody>
             {bySymbol.map((r) => (
-              <tr key={r.key} className="border-t border-line">
-                <td className="py-1.5">{r.key}</td>
+              <tr key={r.key}>
+                <td className="font-mono">{r.key}</td>
                 <td className="text-right font-mono">{r.trades}</td>
                 <td className="text-right font-mono">{(r.winRate * 100).toFixed(0)}%</td>
                 <td className={`text-right font-mono ${r.pnl >= 0 ? "text-success" : "text-danger"}`}>{r.pnl.toFixed(2)}</td>
               </tr>
             ))}
-            {bySymbol.length === 0 && <tr><td colSpan={4} className="text-slate-500 py-2">No closed trades yet.</td></tr>}
+            {bySymbol.length === 0 && <tr><td colSpan={4} className="text-slate-500 py-3">No closed trades yet.</td></tr>}
           </tbody>
         </table>
-      </section>
+      </Card>
 
-      {/* ---- Per-pattern ---- */}
-      <section className="card">
-        <h2 className="text-sm uppercase text-slate-400 mb-3">PnL by SMC pattern</h2>
-        <table className="w-full text-sm">
-          <thead className="text-slate-400">
-            <tr><th className="text-left">Pattern</th><th className="text-right">Trades</th><th className="text-right">Win rate</th><th className="text-right">PnL</th></tr>
-          </thead>
+      <Card title="PnL by SMC Pattern">
+        <table className="t">
+          <thead><tr><th>Pattern</th><th className="text-right">Trades</th><th className="text-right">Win rate</th><th className="text-right">PnL</th></tr></thead>
           <tbody>
             {byKind.map((r) => (
-              <tr key={r.key} className="border-t border-line">
-                <td className="py-1.5 font-mono">{r.key}</td>
+              <tr key={r.key}>
+                <td className="font-mono">{r.key}</td>
                 <td className="text-right font-mono">{r.trades}</td>
                 <td className="text-right font-mono">{(r.winRate * 100).toFixed(0)}%</td>
                 <td className={`text-right font-mono ${r.pnl >= 0 ? "text-success" : "text-danger"}`}>{r.pnl.toFixed(2)}</td>
               </tr>
             ))}
-            {byKind.length === 0 && <tr><td colSpan={4} className="text-slate-500 py-2">No closed trades yet.</td></tr>}
+            {byKind.length === 0 && <tr><td colSpan={4} className="text-slate-500 py-3">No closed trades yet.</td></tr>}
           </tbody>
         </table>
-      </section>
+      </Card>
 
-      {/* ---- Coinglass attribution ---- */}
-      <section className="card">
-        <h2 className="text-sm uppercase text-slate-400 mb-3">Coinglass confluence attribution</h2>
+      <Card title="Coinglass Confluence Attribution">
         <p className="text-sm text-slate-400 mb-3">
-          If Coinglass is helping, the average confluence multiplier on winning trades should
-          be <span className="text-success font-mono">higher</span> than on losing trades.
+          If Coinglass is improving accuracy, the average confluence multiplier on winning
+          trades should be <span className="text-success font-mono">higher</span> than on losing trades.
         </p>
-        <div className="grid grid-cols-2 gap-4">
-          <div className="kv"><span>Avg multiplier on WINS</span><span className="text-success">{avgCgWins?.toFixed(2) ?? "—"} (n={cgWins.length})</span></div>
-          <div className="kv"><span>Avg multiplier on LOSSES</span><span className="text-danger">{avgCgLosses?.toFixed(2) ?? "—"} (n={cgLosses.length})</span></div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="kv"><span>Avg multiplier · WINS</span><span className="text-success">{avgCgWins?.toFixed(2) ?? "—"} <span className="text-slate-500 text-xs">(n={cgWins.length})</span></span></div>
+          <div className="kv"><span>Avg multiplier · LOSSES</span><span className="text-danger">{avgCgLosses?.toFixed(2) ?? "—"} <span className="text-slate-500 text-xs">(n={cgLosses.length})</span></span></div>
         </div>
-      </section>
+      </Card>
 
-      {/* ---- Trade history ---- */}
-      <section className="card">
-        <h2 className="text-sm uppercase text-slate-400 mb-3">Recent trades</h2>
-        <table className="w-full text-sm">
-          <thead className="text-slate-400">
+      <Card title="Recent Trades">
+        <table className="t">
+          <thead>
             <tr>
-              <th className="text-left">Closed</th>
-              <th className="text-left">Symbol · Side</th>
-              <th className="text-left">Pattern</th>
+              <th>Closed</th>
+              <th>Symbol · Side</th>
+              <th>Pattern</th>
               <th className="text-right">Entry → Exit</th>
               <th className="text-right">Conf</th>
               <th className="text-right">Reason</th>
@@ -146,24 +130,22 @@ export default async function ReportsPage() {
           </thead>
           <tbody>
             {trades.slice(0, 50).map((t) => (
-              <tr key={t.id} className="border-t border-line">
-                <td className="py-1.5 text-slate-300">{t.closedAt ? new Date(t.closedAt).toLocaleString() : "open"}</td>
-                <td><span className={t.side === "LONG" ? "text-success" : "text-danger"}>{t.symbol} {t.side}</span></td>
+              <tr key={t.id}>
+                <td className="text-slate-400 text-xs">{t.closedAt ? new Date(t.closedAt).toLocaleString() : "open"}</td>
+                <td><span className={t.side === "LONG" ? "pill-good" : "pill-bad"}>{t.symbol} {t.side}</span></td>
                 <td className="font-mono text-slate-300">{t.signal?.kind ?? "—"}</td>
                 <td className="text-right font-mono">{t.entryPrice.toFixed(4)} → {t.exitPrice?.toFixed(4) ?? "—"}</td>
                 <td className="text-right font-mono">{t.signal?.confidence ? (t.signal.confidence * 100).toFixed(0) + "%" : "—"}</td>
-                <td className="text-right">{t.reason ?? "—"}</td>
+                <td className="text-right">{t.reason ? <span className="pill-neut">{t.reason}</span> : "—"}</td>
                 <td className={`text-right font-mono ${(t.pnl ?? 0) >= 0 ? "text-success" : "text-danger"}`}>{t.pnl?.toFixed(2) ?? "—"}</td>
               </tr>
             ))}
-            {trades.length === 0 && <tr><td colSpan={7} className="text-slate-500 py-2">No trades yet.</td></tr>}
+            {trades.length === 0 && <tr><td colSpan={7} className="text-slate-500 py-3">No trades yet.</td></tr>}
           </tbody>
         </table>
-      </section>
+      </Card>
 
-      {/* ---- Screening history ---- */}
-      <section className="card">
-        <h2 className="text-sm uppercase text-slate-400 mb-3">Screening history</h2>
+      <Card title="Screening History">
         <div className="space-y-3">
           {screeningRuns.map((r) => {
             let scanned: string[] = [];
@@ -173,24 +155,22 @@ export default async function ReportsPage() {
                 <div className="flex items-center justify-between text-sm">
                   <div>
                     <span className="text-slate-300">{new Date(r.runAt).toLocaleString()}</span>
-                    <span className="text-slate-500"> · scanned {scanned.length} symbols · {r.candidateCount} candidates</span>
+                    <span className="text-slate-500"> · scanned {scanned.length} · {r.candidateCount} candidates</span>
                   </div>
                   <div>
                     {r.selectedSymbol
-                      ? <span className={r.selectedSide === "LONG" ? "text-success" : "text-danger"}>SELECTED: {r.selectedSymbol} {r.selectedSide} @ {r.bestConfidence?.toFixed(2)}</span>
-                      : <span className="text-slate-500">No execution ({r.bestConfidence?.toFixed(2) ?? "—"})</span>}
+                      ? <span className={r.selectedSide === "LONG" ? "pill-good" : "pill-bad"}>SELECTED: {r.selectedSymbol} {r.selectedSide} @ {r.bestConfidence?.toFixed(2)}</span>
+                      : <span className="text-slate-500 text-xs">No execution ({r.bestConfidence?.toFixed(2) ?? "—"})</span>}
                   </div>
                 </div>
                 <p className="text-xs text-slate-500 mt-1">{r.reason}</p>
                 {r.signals.length > 0 && (
-                  <table className="w-full text-xs mt-2">
-                    <thead className="text-slate-500">
-                      <tr><th className="text-left">Symbol</th><th className="text-left">Side</th><th className="text-left">Kind</th><th className="text-right">SMC</th><th className="text-right">×CG</th><th className="text-right">Final</th><th className="text-right">Acted</th></tr>
-                    </thead>
+                  <table className="t text-xs mt-2">
+                    <thead><tr><th>Symbol</th><th>Side</th><th>Kind</th><th className="text-right">SMC</th><th className="text-right">×CG</th><th className="text-right">Final</th><th className="text-right">Acted</th></tr></thead>
                     <tbody>
                       {r.signals.map((s) => (
-                        <tr key={s.id} className="border-t border-line">
-                          <td className="py-0.5">{s.symbol}</td>
+                        <tr key={s.id}>
+                          <td className="font-mono">{s.symbol}</td>
                           <td className={s.side === "LONG" ? "text-success" : "text-danger"}>{s.side}</td>
                           <td className="font-mono text-slate-400">{s.kind}</td>
                           <td className="text-right font-mono">{(s.baseConfidence * 100).toFixed(0)}%</td>
@@ -207,7 +187,7 @@ export default async function ReportsPage() {
           })}
           {screeningRuns.length === 0 && <p className="text-slate-500 text-sm">No screening runs yet.</p>}
         </div>
-      </section>
+      </Card>
     </main>
   );
 }
@@ -215,8 +195,7 @@ export default async function ReportsPage() {
 // ----- helpers ------------------------------------------------------------
 
 function aggregateBy<T extends { pnl: number | null }>(
-  rows: T[],
-  keyFn: (t: T) => string
+  rows: T[], keyFn: (t: T) => string
 ): Array<{ key: string; trades: number; wins: number; pnl: number; winRate: number; }> {
   const map = new Map<string, { trades: number; wins: number; pnl: number; }>();
   for (const t of rows) {
@@ -230,14 +209,4 @@ function aggregateBy<T extends { pnl: number | null }>(
   return Array.from(map.entries())
     .map(([key, v]) => ({ key, ...v, winRate: v.trades ? v.wins / v.trades : 0 }))
     .sort((a, b) => b.pnl - a.pnl);
-}
-
-function StatCard({ label, value, tone }: { label: string; value: string; tone?: "good" | "bad" | "warn" }) {
-  const c = tone === "good" ? "text-success" : tone === "bad" ? "text-danger" : tone === "warn" ? "text-yellow-400" : "text-slate-100";
-  return (
-    <div className="card">
-      <p className="text-xs uppercase text-slate-400">{label}</p>
-      <p className={`text-xl font-mono mt-1 ${c}`}>{value}</p>
-    </div>
-  );
 }

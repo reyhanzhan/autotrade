@@ -26,6 +26,7 @@ import { Screener } from "./screener/screener.js";
 import { resolveWatchlist } from "./screener/symbols.js";
 import { CoinglassClient } from "./external/coinglass.js";
 import { PositionReconciler } from "./reconciler/positionReconciler.js";
+import { BalancePoller } from "./reconciler/balancePoller.js";
 import type { Candle } from "./shared/types.js";
 
 export class TradingEngine {
@@ -33,6 +34,7 @@ export class TradingEngine {
   private screener?: Screener;
   private risk?: RiskManager;
   private reconciler?: PositionReconciler;
+  private balancePoller?: BalancePoller;
   private lastEvaluatedAt = new Map<string, number>(); // symbol → last candle openTime
 
   async start(): Promise<void> {
@@ -77,6 +79,9 @@ export class TradingEngine {
 
     this.reconciler = new PositionReconciler(client);
     this.reconciler.start();
+
+    this.balancePoller = new BalancePoller(client);
+    this.balancePoller.start();
 
     this.stream = new BinanceStream({
       subscriptions: watchlist.map((s) => ({ symbol: s, interval })),
@@ -138,6 +143,7 @@ export class TradingEngine {
   }
 
   async stop(): Promise<void> {
+    this.balancePoller?.stop();
     this.reconciler?.stop();
     this.stream?.close();
     await prisma.$disconnect();

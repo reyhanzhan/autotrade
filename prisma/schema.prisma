@@ -206,6 +206,22 @@ model Position {
 }
 
 // ----------------------------------------------------------------------------
+// BalanceSnapshot — periodic capture of account equity. Powers the balance
+// card on the dashboard and the equity-over-time chart on /reports.
+// ----------------------------------------------------------------------------
+model BalanceSnapshot {
+  id                  Int      @id @default(autoincrement())
+  capturedAt          DateTime @default(now())
+  totalWalletBalance  Float                                // sum of all assets in USDT
+  availableBalance    Float                                // free margin
+  marginBalance       Float                                // wallet + unrealized
+  unrealizedProfit    Float    @default(0)
+  testnet             Boolean  @default(true)
+
+  @@index([capturedAt])
+}
+
+// ----------------------------------------------------------------------------
 // EventLog — structured engine events surfaced on the dashboard.
 // ----------------------------------------------------------------------------
 model EventLog {
