@@ -52,6 +52,7 @@ export class BinanceFuturesClient {
   private readonly http: AxiosInstance;
   private readonly recvWindow: number;
   private timeOffsetMs = 0;
+  private bannedUntil = 0;
   private usedWeight = 0;
   private weightResetAt = Date.now() + 60_000;
   private orderCount = 0;
@@ -60,6 +61,7 @@ export class BinanceFuturesClient {
   private static readonly WEIGHT_CAP = 2400;
   private static readonly WEIGHT_HEADROOM = 0.9;       // refuse at 90% used
   private static readonly ORDER_CAP_PER_MIN = 1200;
+  private static readonly RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
 
   constructor(private readonly creds: BinanceCredentials, opts: BinanceClientOptions = {}) {
     const baseURL = opts.restBaseUrl ?? (
@@ -268,6 +270,14 @@ export class BinanceFuturesClient {
     const normalized = new Error(parts.join(" "));
     (normalized as Error & { status?: number; code?: number }).status = status;
     (normalized as Error & { status?: number; code?: number }).code = code;
+    if (status === 418 || code === -1003) {
+      const banUntil = msg.match(/banned until (\d{13})/i)?.[1];
+      const parsed = banUntil ? Number(banUntil) : NaN;
+      this.bannedUntil = Number.isFinite(parsed) && parsed > Date.now()
+        ? parsed + 30_000
+        : Date.now() + BinanceFuturesClient.RATE_LIMIT_BACKOFF_MS;
+      (normalized as Error & { bannedUntil?: number }).bannedUntil = this.bannedUntil;
+    }
     return normalized;
   }
 
@@ -288,6 +298,15 @@ export class BinanceFuturesClient {
   }
 
   private assertWeightHeadroom(): void {
+    const now = Date.now();
+    if (this.bannedUntil > now) {
+      const sleepMs = this.bannedUntil - now;
+      throw new Error(`Binance IP/account rate-limited; backoff ${sleepMs}ms until ${new Date(this.bannedUntil).toISOString()}`);
+    }
+    if (now > this.weightResetAt) {
+      this.usedWeight = 0;
+      this.weightResetAt = now + 60_000;
+    }
     const cap = BinanceFuturesClient.WEIGHT_CAP * BinanceFuturesClient.WEIGHT_HEADROOM;
     if (this.usedWeight > cap) {
       const sleepMs = Math.max(this.weightResetAt - Date.now(), 1000);

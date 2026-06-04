@@ -23,6 +23,8 @@ import { env } from "../shared/env.js";
 import type { TradeSignal } from "../shared/types.js";
 import type { BinanceFuturesClient } from "./binanceClient.js";
 
+const MAX_MARGIN_USAGE = 0.8;
+
 export interface RiskConfig {
   leverage: number;
   marginType: "ISOLATED" | "CROSSED";
@@ -85,8 +87,13 @@ export class RiskManager {
 
     const account = await this.client.accountInfo() as Record<string, unknown>;
     const equity = Number(account.totalWalletBalance ?? 0);
+    const availableBalance = Number(account.availableBalance ?? equity);
     if (equity <= 0) {
       await recordEvent("execution", "error", "Account equity unavailable or zero", { account });
+      return;
+    }
+    if (availableBalance <= 0) {
+      await recordEvent("execution", "error", "Available margin unavailable or zero", { availableBalance, equity });
       return;
     }
 
@@ -102,13 +109,27 @@ export class RiskManager {
       return;
     }
 
-    const rawQty = riskUsdt / stopDistance;
+    const riskQty = riskUsdt / stopDistance;
+    const maxNotional = availableBalance * this.cfg.leverage * MAX_MARGIN_USAGE;
+    const marginQty = maxNotional / signal.entryPrice;
+    const rawQty = Math.min(riskQty, marginQty);
     const qty = roundStep(rawQty, qtyStep);
     if (qty < minQty) {
       await recordEvent("execution", "warn", "Computed qty below minQty; skipping", {
-        rawQty, qty, minQty, symbol,
+        riskQty, marginQty, qty, minQty, symbol,
       });
       return;
+    }
+    if (rawQty < riskQty) {
+      await recordEvent("execution", "warn", "Position size capped by available margin", {
+        symbol,
+        riskQty,
+        marginQty,
+        qty,
+        availableBalance,
+        leverage: this.cfg.leverage,
+        maxMarginUsage: MAX_MARGIN_USAGE,
+      });
     }
 
     const orderSide = signal.side === "LONG" ? "BUY" : "SELL";
