@@ -19,7 +19,6 @@
 
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
-import { BINANCE_ENDPOINTS } from "../shared/env.js";
 import { logger } from "../shared/logger.js";
 import type { Candle } from "../shared/types.js";
 
@@ -48,6 +47,8 @@ export interface BinanceStreamOptions {
   subscriptions: Subscription[];
   /** Max candles retained in-memory per symbol (default 500). */
   bufferSize?: number;
+  testnet?: boolean;
+  wsBaseUrl?: string;
 }
 
 export declare interface BinanceStream {
@@ -86,7 +87,10 @@ export class BinanceStream extends EventEmitter {
     const streams = this.opts.subscriptions
       .map((s) => `${s.symbol.toLowerCase()}@kline_${s.interval}`)
       .join("/");
-    const url = `${BINANCE_ENDPOINTS.ws}/stream?streams=${streams}`;
+    const wsBaseUrl = this.opts.wsBaseUrl ?? (
+      this.opts.testnet === false ? "wss://fstream.binance.com" : "wss://stream.binancefuture.com"
+    );
+    const url = `${wsBaseUrl}/stream?streams=${streams}`;
     logger.info({ count: this.opts.subscriptions.length }, "Connecting combined K-Line stream");
 
     const ws = new WebSocket(url);

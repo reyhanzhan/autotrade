@@ -25,6 +25,7 @@ const schema = z.object({
   MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.6),
   LIVE_TRADING: truthy.default("false"),
   RECONCILER_INTERVAL_MS: z.coerce.number().int().min(5_000).max(600_000).default(30_000),
+  BALANCE_POLLER_INTERVAL_MS: z.coerce.number().int().min(60_000).max(3_600_000).default(300_000),
 
   // Coinglass (all optional — bot works without it)
   COINGLASS_API_KEY: z.string().optional().default(""),

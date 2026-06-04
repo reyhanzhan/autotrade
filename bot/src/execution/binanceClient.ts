@@ -20,12 +20,17 @@
 
 import axios, { AxiosError, type AxiosInstance, type AxiosResponse } from "axios";
 import { createHmac } from "node:crypto";
-import { BINANCE_ENDPOINTS } from "../shared/env.js";
 import { logger } from "../shared/logger.js";
 
 export interface BinanceCredentials {
   apiKey: string;
   apiSecret: string;
+}
+
+export interface BinanceClientOptions {
+  testnet?: boolean;
+  restBaseUrl?: string;
+  recvWindow?: number;
 }
 
 export interface PlaceOrderParams {
@@ -45,6 +50,8 @@ export interface PlaceOrderParams {
 
 export class BinanceFuturesClient {
   private readonly http: AxiosInstance;
+  private readonly recvWindow: number;
+  private timeOffsetMs = 0;
   private usedWeight = 0;
   private weightResetAt = Date.now() + 60_000;
   private orderCount = 0;
@@ -54,9 +61,13 @@ export class BinanceFuturesClient {
   private static readonly WEIGHT_HEADROOM = 0.9;       // refuse at 90% used
   private static readonly ORDER_CAP_PER_MIN = 1200;
 
-  constructor(private readonly creds: BinanceCredentials) {
+  constructor(private readonly creds: BinanceCredentials, opts: BinanceClientOptions = {}) {
+    const baseURL = opts.restBaseUrl ?? (
+      opts.testnet === false ? "https://fapi.binance.com" : "https://testnet.binancefuture.com"
+    );
+    this.recvWindow = opts.recvWindow ?? 10_000;
     this.http = axios.create({
-      baseURL: BINANCE_ENDPOINTS.rest,
+      baseURL,
       timeout: 10_000,
       headers: { "X-MBX-APIKEY": creds.apiKey },
     });
@@ -68,6 +79,13 @@ export class BinanceFuturesClient {
   async serverTime(): Promise<number> {
     const r = await this.publicGet<{ serverTime: number }>("/fapi/v1/time");
     return r.serverTime;
+  }
+
+  /** Sync local timestamp offset before signed requests. */
+  async syncTime(): Promise<number> {
+    const server = await this.serverTime();
+    this.timeOffsetMs = server - Date.now();
+    return this.timeOffsetMs;
   }
 
   /** Account balance / margin info. */
@@ -96,7 +114,7 @@ export class BinanceFuturesClient {
     try {
       return await this.signedPost("/fapi/v1/marginType", { symbol, marginType });
     } catch (e) {
-      const code = (e as AxiosError<{ code?: number }>)?.response?.data?.code;
+      const code = (e as Error & { code?: number })?.code;
       if (code === -4046) return { code: -4046, msg: "no change" };
       throw e;
     }
@@ -172,41 +190,57 @@ export class BinanceFuturesClient {
 
   private async publicGet<T>(path: string, params: Record<string, unknown> = {}): Promise<T> {
     this.assertWeightHeadroom();
-    const res = await this.http.get<T>(path, { params });
-    this.updateWeightFromHeaders(res);
-    return res.data;
+    try {
+      const res = await this.http.get<T>(path, { params });
+      this.updateWeightFromHeaders(res);
+      return res.data;
+    } catch (e) {
+      throw this.normalizeError(e, "GET", path);
+    }
   }
 
   private async signedGet<T = unknown>(path: string, params: Record<string, unknown> = {}): Promise<T> {
     this.assertWeightHeadroom();
     const qs = this.signParams(params);
-    const res = await this.http.get<T>(`${path}?${qs}`);
-    this.updateWeightFromHeaders(res);
-    return res.data;
+    try {
+      const res = await this.http.get<T>(`${path}?${qs}`);
+      this.updateWeightFromHeaders(res);
+      return res.data;
+    } catch (e) {
+      throw this.normalizeError(e, "GET", path);
+    }
   }
 
   private async signedPost<T = unknown>(path: string, params: Record<string, unknown> = {}): Promise<T> {
     this.assertWeightHeadroom();
     const qs = this.signParams(params);
-    const res = await this.http.post<T>(`${path}?${qs}`);
-    this.updateWeightFromHeaders(res);
-    return res.data;
+    try {
+      const res = await this.http.post<T>(`${path}?${qs}`);
+      this.updateWeightFromHeaders(res);
+      return res.data;
+    } catch (e) {
+      throw this.normalizeError(e, "POST", path);
+    }
   }
 
   private async signedDelete<T = unknown>(path: string, params: Record<string, unknown> = {}): Promise<T> {
     this.assertWeightHeadroom();
     const qs = this.signParams(params);
-    const res = await this.http.delete<T>(`${path}?${qs}`);
-    this.updateWeightFromHeaders(res);
-    return res.data;
+    try {
+      const res = await this.http.delete<T>(`${path}?${qs}`);
+      this.updateWeightFromHeaders(res);
+      return res.data;
+    } catch (e) {
+      throw this.normalizeError(e, "DELETE", path);
+    }
   }
 
   /** Build URL-encoded query string + HMAC-SHA256 signature. */
   private signParams(params: Record<string, unknown>): string {
     const merged: Record<string, unknown> = {
       ...params,
-      timestamp: Date.now(),
-      recvWindow: 5000,
+      timestamp: Date.now() + this.timeOffsetMs,
+      recvWindow: this.recvWindow,
     };
     const qs = Object.entries(merged)
       .filter(([, v]) => v !== undefined && v !== null)
@@ -214,6 +248,27 @@ export class BinanceFuturesClient {
       .join("&");
     const signature = createHmac("sha256", this.creds.apiSecret).update(qs).digest("hex");
     return `${qs}&signature=${signature}`;
+  }
+
+  private normalizeError(e: unknown, method: string, path: string): Error {
+    if (!axios.isAxiosError(e)) return e instanceof Error ? e : new Error(String(e));
+
+    const err = e as AxiosError<{ code?: number; msg?: string }>;
+    const status = err.response?.status;
+    const code = err.response?.data?.code;
+    const msg = err.response?.data?.msg ?? err.message;
+    const baseURL = err.config?.baseURL ?? this.http.defaults.baseURL;
+    const parts = [
+      `Binance ${method} ${path} failed`,
+      status ? `status=${status}` : undefined,
+      code !== undefined ? `code=${code}` : undefined,
+      `msg=${msg}`,
+      `baseURL=${baseURL}`,
+    ].filter(Boolean);
+    const normalized = new Error(parts.join(" "));
+    (normalized as Error & { status?: number; code?: number }).status = status;
+    (normalized as Error & { status?: number; code?: number }).code = code;
+    return normalized;
   }
 
   private updateWeightFromHeaders(res: AxiosResponse): void {

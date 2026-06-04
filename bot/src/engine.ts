@@ -48,16 +48,19 @@ export class TradingEngine {
     const apiKey = decryptSecret({ cipher: cfg.apiKeyCipher, iv: cfg.apiKeyIv, tag: cfg.apiKeyTag });
     const apiSecret = decryptSecret({ cipher: cfg.apiSecretCipher, iv: cfg.apiSecretIv, tag: cfg.apiSecretTag });
 
-    const client = new BinanceFuturesClient({ apiKey, apiSecret });
+    const client = new BinanceFuturesClient({ apiKey, apiSecret }, { testnet: cfg.testnet });
 
     // Clock-skew sanity.
     try {
-      const skew = Math.abs((await client.serverTime()) - Date.now());
+      const offset = await client.syncTime();
+      const skew = Math.abs(offset);
       if (skew > 1000) {
-        await recordEvent("execution", "warn", "Clock skew >1s vs Binance server", { skewMs: skew });
+        await recordEvent("execution", "warn", "Clock skew >1s vs Binance server; using synced timestamp offset", {
+          skewMs: skew,
+        });
       }
     } catch (err) {
-      await recordEvent("execution", "error", "serverTime() failed — check API keys / network", {
+      await recordEvent("execution", "error", "serverTime() failed - check Binance network access", {
         err: (err as Error).message,
       });
       return;
@@ -80,12 +83,13 @@ export class TradingEngine {
     this.reconciler = new PositionReconciler(client);
     this.reconciler.start();
 
-    this.balancePoller = new BalancePoller(client);
+    this.balancePoller = new BalancePoller(client, cfg.testnet);
     this.balancePoller.start();
 
     this.stream = new BinanceStream({
       subscriptions: watchlist.map((s) => ({ symbol: s, interval })),
       bufferSize: env.CANDLE_HISTORY,
+      testnet: cfg.testnet,
     });
 
     this.stream.on("candle", (symbol: string, closed: Candle, all: Candle[]) => {
@@ -101,7 +105,7 @@ export class TradingEngine {
 
     this.stream.connect();
     await recordEvent("engine", "info", "Engine started", {
-      symbols: watchlist, interval, live: env.LIVE_TRADING, testnet: env.TESTNET,
+      symbols: watchlist, interval, live: env.LIVE_TRADING, testnet: cfg.testnet,
       coinglass: env.hasCoinglass, minConfidence,
     });
   }

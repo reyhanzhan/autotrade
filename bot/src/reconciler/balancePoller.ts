@@ -15,20 +15,24 @@ import { env } from "../shared/env.js";
 import { recordEvent } from "../shared/logger.js";
 import type { BinanceFuturesClient } from "../execution/binanceClient.js";
 
-const POLL_INTERVAL_MS = 60_000;
 /** Minimum delta vs. previous snapshot to bother writing a new row. */
 const DEDUPE_EPSILON = 0.0001;
+const RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
 
 export class BalancePoller {
   private timer?: NodeJS.Timeout;
   private inFlight = false;
+  private pausedUntil = 0;
 
-  constructor(private readonly client: BinanceFuturesClient) {}
+  constructor(
+    private readonly client: BinanceFuturesClient,
+    private readonly testnet: boolean
+  ) {}
 
   start(): void {
     if (this.timer) return;
     void this.tick();
-    this.timer = setInterval(() => void this.tick(), POLL_INTERVAL_MS);
+    this.timer = setInterval(() => void this.tick(), env.BALANCE_POLLER_INTERVAL_MS);
   }
 
   stop(): void {
@@ -39,9 +43,17 @@ export class BalancePoller {
     if (this.inFlight) return;
     this.inFlight = true;
     try {
+      if (Date.now() < this.pausedUntil) return;
       await this.snapshot();
     } catch (e) {
-      await recordEvent("balance", "warn", "Balance snapshot failed", { err: (e as Error).message });
+      const err = e as Error & { status?: number; code?: number };
+      const backoffUntil = backoffUntilFromError(err);
+      if (backoffUntil) this.pausedUntil = backoffUntil;
+
+      await recordEvent("balance", "warn", "Balance snapshot failed", {
+        err: err.message,
+        ...(backoffUntil && { backoffUntil: new Date(backoffUntil).toISOString() }),
+      });
     } finally {
       this.inFlight = false;
     }
@@ -72,8 +84,20 @@ export class BalancePoller {
         availableBalance,
         marginBalance,
         unrealizedProfit,
-        testnet: env.TESTNET,
+        testnet: this.testnet,
       },
     });
   }
+}
+
+function backoffUntilFromError(err: Error & { status?: number; code?: number }): number | undefined {
+  if (err.status !== 418 && err.code !== -1003) return undefined;
+
+  const banUntil = err.message.match(/banned until (\d{13})/i)?.[1];
+  if (banUntil) {
+    const ts = Number(banUntil);
+    if (Number.isFinite(ts) && ts > Date.now()) return ts + 30_000;
+  }
+
+  return Date.now() + RATE_LIMIT_BACKOFF_MS;
 }

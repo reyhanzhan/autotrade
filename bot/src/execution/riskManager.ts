@@ -41,17 +41,19 @@ export class RiskManager {
 
   /** Idempotent: applies leverage + margin type to a symbol the first time it
    *  is touched. Subsequent calls are no-ops. */
-  async ensureSettingsFor(symbol: string): Promise<void> {
-    if (this.prepared.has(symbol)) return;
+  async ensureSettingsFor(symbol: string): Promise<boolean> {
+    if (this.prepared.has(symbol)) return true;
     try {
       await this.client.setMarginType(symbol, this.cfg.marginType);
       await this.client.setLeverage(symbol, this.cfg.leverage);
       this.prepared.add(symbol);
       logger.info({ symbol, leverage: this.cfg.leverage, marginType: this.cfg.marginType }, "Symbol prepared");
+      return true;
     } catch (e) {
       await recordEvent("execution", "warn", "Failed to prepare symbol — skipping", {
         symbol, err: (e as Error).message,
       });
+      return false;
     }
   }
 
@@ -73,7 +75,13 @@ export class RiskManager {
       return;
     }
 
-    await this.ensureSettingsFor(symbol);
+    const existing = await prisma.position.findUnique({ where: { symbol } });
+    if (existing) {
+      await recordEvent("execution", "warn", "Position already open for symbol; skipping", { symbol });
+      return;
+    }
+
+    if (!(await this.ensureSettingsFor(symbol))) return;
 
     const account = await this.client.accountInfo() as Record<string, unknown>;
     const equity = Number(account.totalWalletBalance ?? 0);
