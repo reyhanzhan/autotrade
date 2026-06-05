@@ -23,7 +23,7 @@ import { BinanceStream } from "./websocket/binanceStream.js";
 import { BinanceFuturesClient } from "./execution/binanceClient.js";
 import { RiskManager } from "./execution/riskManager.js";
 import { Screener } from "./screener/screener.js";
-import { resolveWatchlist } from "./screener/symbols.js";
+import { resolveExchangeUniverse, resolveWatchlist } from "./screener/symbols.js";
 import { CoinglassClient } from "./external/coinglass.js";
 import { PositionReconciler } from "./reconciler/positionReconciler.js";
 import { BalancePoller } from "./reconciler/balancePoller.js";
@@ -36,6 +36,7 @@ export class TradingEngine {
   private reconciler?: PositionReconciler;
   private balancePoller?: BalancePoller;
   private lastEvaluatedAt = new Map<string, number>(); // symbol → last candle openTime
+  private executionCooldownUntil = new Map<string, number>();
 
   async start(): Promise<void> {
     const cfg = await prisma.botConfig.findFirst({ where: { enabled: true } });
@@ -66,7 +67,15 @@ export class TradingEngine {
       return;
     }
 
-    const watchlist = resolveWatchlist(cfg);
+    const watchlist = env.AUTO_DISCOVER_SYMBOLS
+      ? resolveExchangeUniverse(await client.exchangeInfo())
+      : resolveWatchlist(cfg);
+    if (watchlist.length === 0) {
+      await recordEvent("engine", "error", "No symbols resolved for screener", {
+        autoDiscover: env.AUTO_DISCOVER_SYMBOLS,
+      });
+      return;
+    }
     const interval = cfg.interval;
     const minConfidence = cfg.minConfidence ?? env.MIN_CONFIDENCE;
 
@@ -117,7 +126,7 @@ export class TradingEngine {
 
     if (!this.screener || !this.risk) return;
 
-    const result = await this.screener.onClosedCandle(symbol, all);
+    const result = await this.screener.onClosedCandle(symbol, all, this.cooldownSymbols());
     if (!result?.selected) return;
 
     const { signal, confluence, finalConfidence } = result.selected;
@@ -140,10 +149,19 @@ export class TradingEngine {
       orderBy: { id: "desc" },
     });
 
-    await this.risk.execute(
-      { ...signal, confidence: finalConfidence },
-      sigRow?.id
-    );
+    try {
+      await this.risk.execute(
+        { ...signal, confidence: finalConfidence },
+        sigRow?.id
+      );
+      this.setExecutionCooldown(signal.symbol, env.TRADE_SYMBOL_COOLDOWN_MS, "Trade execution cooldown started");
+    } catch (err) {
+      const cooldownMs = cooldownMsForError(err, env.FAILED_TRADE_COOLDOWN_MS);
+      this.setExecutionCooldown(signal.symbol, cooldownMs, "Failed execution cooldown started", {
+        err: (err as Error).message,
+      });
+      throw err;
+    }
   }
 
   async stop(): Promise<void> {
@@ -152,4 +170,41 @@ export class TradingEngine {
     this.stream?.close();
     await prisma.$disconnect();
   }
+
+  private cooldownSymbols(): Set<string> {
+    const now = Date.now();
+    const symbols = new Set<string>();
+    for (const [symbol, until] of this.executionCooldownUntil) {
+      if (until > now) symbols.add(symbol);
+      else this.executionCooldownUntil.delete(symbol);
+    }
+    return symbols;
+  }
+
+  private setExecutionCooldown(
+    symbol: string,
+    ms: number,
+    message: string,
+    meta: Record<string, unknown> = {}
+  ): void {
+    const until = Date.now() + ms;
+    this.executionCooldownUntil.set(symbol, until);
+    void recordEvent("execution", "info", message, {
+      symbol,
+      cooldownUntil: new Date(until).toISOString(),
+      ...meta,
+    });
+  }
+}
+
+function cooldownMsForError(err: unknown, fallbackMs: number): number {
+  const message = err instanceof Error ? err.message : String(err);
+  const banUntil = message.match(/banned until (\d{13})/i)?.[1];
+  if (banUntil) {
+    const ts = Number(banUntil);
+    if (Number.isFinite(ts) && ts > Date.now()) {
+      return Math.min(ts + 30_000 - Date.now(), 86_400_000);
+    }
+  }
+  return fallbackMs;
 }

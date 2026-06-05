@@ -26,4 +26,24 @@ export function resolveWatchlist(cfg: BotConfig): string[] {
   return merged.length ? merged : ["BTCUSDT"];
 }
 
+export function resolveExchangeUniverse(filters: Map<string, Record<string, unknown>>): string[] {
+  const symbols = Array.from(filters.values())
+    .filter((s) => {
+      const symbol = String(s.symbol ?? "");
+      const quoteAsset = String(s.quoteAsset ?? "");
+      const contractType = String(s.contractType ?? "");
+      const status = String(s.status ?? "");
+      return (
+        symbol.endsWith("USDT") &&
+        quoteAsset === "USDT" &&
+        contractType === "PERPETUAL" &&
+        status === "TRADING"
+      );
+    })
+    .map((s) => String(s.symbol).toUpperCase())
+    .sort();
+
+  return dedupe(symbols).slice(0, env.MAX_SCREENER_SYMBOLS);
+}
+
 function dedupe<T>(xs: T[]): T[] { return Array.from(new Set(xs)); }

@@ -87,7 +87,11 @@ export class Screener {
    * Called by the engine each time a candle closes for some symbol.
    * Returns the screening result (or undefined if nothing was selected).
    */
-  async onClosedCandle(symbol: string, candles: Candle[]): Promise<ScreeningResult | undefined> {
+  async onClosedCandle(
+    symbol: string,
+    candles: Candle[],
+    excludedSymbols = new Set<string>()
+  ): Promise<ScreeningResult | undefined> {
     const engine = this.engines.get(symbol);
     if (!engine) return;
 
@@ -110,17 +114,21 @@ export class Screener {
     if (this.candidates.size === 0) return;
 
     // 3. Cross-symbol screening pass
-    return await this.runScreeningPass();
+    return await this.runScreeningPass(excludedSymbols);
   }
 
   /** Manually trigger a screening pass against the current candidate cache. */
-  async runScreeningPass(): Promise<ScreeningResult> {
-    const symbols = Array.from(this.candidates.keys());
+  async runScreeningPass(excludedSymbols = new Set<string>()): Promise<ScreeningResult | undefined> {
+    const entries = Array.from(this.candidates.entries())
+      .filter(([sym]) => !excludedSymbols.has(sym));
+    if (entries.length === 0) return undefined;
+
+    const symbols = entries.map(([sym]) => sym);
     const symbolsJson = JSON.stringify(symbols);
 
     // Score each candidate with Coinglass confluence in parallel.
     const scored = await Promise.all(
-      Array.from(this.candidates.entries()).map(async ([sym, c]) => {
+      entries.map(async ([sym, c]) => {
         let confluence: ConfluenceBreakdown = NEUTRAL_CONFLUENCE;
         try {
           const m = await this.coinglass.getMetrics(sym);

@@ -70,9 +70,10 @@ export class RiskManager {
       return;
     }
 
-    // GLOBAL concurrency cap.
+    // GLOBAL concurrency cap. maxConcurrent <= 0 means unlimited internally;
+    // Binance margin and the sizing guard still cap what can actually open.
     const open = await prisma.position.count();
-    if (open >= this.cfg.maxConcurrent) {
+    if (this.cfg.maxConcurrent > 0 && open >= this.cfg.maxConcurrent) {
       await recordEvent("execution", "warn", "Global concurrency cap reached; skipping", { open });
       return;
     }

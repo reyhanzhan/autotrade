@@ -16,6 +16,8 @@ const schema = z.object({
 
   TESTNET: truthy.default("true"),
   SYMBOLS: z.string().default("BTCUSDT"),
+  AUTO_DISCOVER_SYMBOLS: truthy.default("false"),
+  MAX_SCREENER_SYMBOLS: z.coerce.number().int().min(1).max(200).default(80),
   INTERVAL: z
     .enum(["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"])
     .default("15m"),
@@ -26,6 +28,8 @@ const schema = z.object({
   LIVE_TRADING: truthy.default("false"),
   RECONCILER_INTERVAL_MS: z.coerce.number().int().min(5_000).max(600_000).default(30_000),
   BALANCE_POLLER_INTERVAL_MS: z.coerce.number().int().min(60_000).max(3_600_000).default(300_000),
+  TRADE_SYMBOL_COOLDOWN_MS: z.coerce.number().int().min(60_000).max(86_400_000).default(21_600_000),
+  FAILED_TRADE_COOLDOWN_MS: z.coerce.number().int().min(60_000).max(86_400_000).default(3_600_000),
 
   // Coinglass (all optional — bot works without it)
   COINGLASS_API_KEY: z.string().optional().default(""),

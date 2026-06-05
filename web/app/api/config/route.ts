@@ -28,7 +28,8 @@ const bodySchema = z.object({
   leverage: z.number().int().min(1).max(125).default(5),
   marginType: z.enum(["ISOLATED", "CROSSED"]).default("ISOLATED"),
   riskPercent: z.number().min(0.1).max(50).default(1.0),
-  maxConcurrent: z.number().int().min(1).max(10).default(1),
+  // 0 means no internal cap; exchange margin/risk sizing still constrain entries.
+  maxConcurrent: z.number().int().min(0).max(100).default(1),
   minConfidence: z.number().min(0).max(1).default(0.6),
   enabled: z.boolean().default(false),
 });

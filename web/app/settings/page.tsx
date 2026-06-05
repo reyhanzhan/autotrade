@@ -36,7 +36,7 @@ export default async function SettingsPage() {
             <div className="kv"><span>Margin Type</span><span>{cfg.marginType}</span></div>
             <div className="kv"><span>Risk per trade</span><span>{cfg.riskPercent}%</span></div>
             <div className="kv"><span>Min confidence</span><span>{cfg.minConfidence}</span></div>
-            <div className="kv"><span>Max concurrent</span><span>{cfg.maxConcurrent}</span></div>
+            <div className="kv"><span>Max concurrent</span><span>{cfg.maxConcurrent === 0 ? "Unlimited" : cfg.maxConcurrent}</span></div>
             <div className="kv"><span>Last updated</span><span>{new Date(cfg.updatedAt).toLocaleString()}</span></div>
           </div>
         )}
@@ -68,7 +68,7 @@ export default async function SettingsPage() {
     "leverage": 5,
     "marginType": "ISOLATED",
     "riskPercent": 1.0,
-    "maxConcurrent": 1,
+    "maxConcurrent": 3,
     "minConfidence": 0.6,
     "enabled": true
   }'`}</pre>
