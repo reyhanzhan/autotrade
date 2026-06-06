@@ -37,6 +37,8 @@ export class TradingEngine {
   private balancePoller?: BalancePoller;
   private lastEvaluatedAt = new Map<string, number>(); // symbol → last candle openTime
   private executionCooldownUntil = new Map<string, number>();
+  private globalExecutionCooldownUntil = 0;
+  private executionInFlight = false;
 
   async start(): Promise<void> {
     const cfg = await prisma.botConfig.findFirst({ where: { enabled: true } });
@@ -125,6 +127,7 @@ export class TradingEngine {
     this.lastEvaluatedAt.set(symbol, closed.openTime);
 
     if (!this.screener || !this.risk) return;
+    if (Date.now() < this.globalExecutionCooldownUntil || this.executionInFlight) return;
 
     const result = await this.screener.onClosedCandle(symbol, all, this.cooldownSymbols());
     if (!result?.selected) return;
@@ -149,18 +152,33 @@ export class TradingEngine {
       orderBy: { id: "desc" },
     });
 
+    this.executionInFlight = true;
     try {
-      await this.risk.execute(
+      const placed = await this.risk.execute(
         { ...signal, confidence: finalConfidence },
         sigRow?.id
       );
-      this.setExecutionCooldown(signal.symbol, env.TRADE_SYMBOL_COOLDOWN_MS, "Trade execution cooldown started");
+      this.setExecutionCooldown(
+        signal.symbol,
+        placed ? env.TRADE_SYMBOL_COOLDOWN_MS : env.FAILED_TRADE_COOLDOWN_MS,
+        placed ? "Trade execution cooldown started" : "Skipped execution cooldown started"
+      );
     } catch (err) {
       const cooldownMs = cooldownMsForError(err, env.FAILED_TRADE_COOLDOWN_MS);
+      const globalUntil = globalCooldownUntilForError(err);
+      if (globalUntil) {
+        this.globalExecutionCooldownUntil = globalUntil;
+        void recordEvent("execution", "warn", "Global execution backoff started", {
+          cooldownUntil: new Date(globalUntil).toISOString(),
+          err: (err as Error).message,
+        });
+      }
       this.setExecutionCooldown(signal.symbol, cooldownMs, "Failed execution cooldown started", {
         err: (err as Error).message,
       });
       throw err;
+    } finally {
+      this.executionInFlight = false;
     }
   }
 
@@ -206,5 +224,17 @@ function cooldownMsForError(err: unknown, fallbackMs: number): number {
       return Math.min(ts + 30_000 - Date.now(), 86_400_000);
     }
   }
+  const isoUntil = message.match(/until (\d{4}-\d{2}-\d{2}T[0-9:.]+Z)/i)?.[1];
+  if (isoUntil) {
+    const ts = Date.parse(isoUntil);
+    if (Number.isFinite(ts) && ts > Date.now()) {
+      return Math.min(ts + 30_000 - Date.now(), 86_400_000);
+    }
+  }
   return fallbackMs;
+}
+
+function globalCooldownUntilForError(err: unknown): number | undefined {
+  const ms = cooldownMsForError(err, 0);
+  return ms > 0 ? Date.now() + ms : undefined;
 }

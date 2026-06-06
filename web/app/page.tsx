@@ -9,6 +9,8 @@ import { prisma } from "@/lib/db";
 import { Card } from "@/components/Card";
 import { StatTile } from "@/components/StatTile";
 import { Sparkline } from "@/components/Sparkline";
+import { LivePositionsTable } from "@/components/LivePositionsTable";
+import { getLivePositionSnapshot } from "@/lib/binanceLive";
 
 export const dynamic = "force-dynamic";
 
@@ -18,7 +20,7 @@ export default async function DashboardPage() {
 
   const [cfg, positions, recentSignals, recentRuns, recentEvents,
          latestBalance, balance24hAgo, balanceHistory,
-         todaysClosed, last30dClosed] = await Promise.all([
+         todaysClosed, last30dClosed, livePositions] = await Promise.all([
     prisma.botConfig.findFirst({ where: { enabled: true } }),
     prisma.position.findMany({ orderBy: { openedAt: "desc" } }),
     prisma.signal.findMany({ orderBy: { createdAt: "desc" }, take: 10 }),
@@ -38,10 +40,15 @@ export default async function DashboardPage() {
       where: { closedAt: { gte: since30d }, pnl: { not: null } },
       select: { pnl: true },
     }),
+    getLivePositionSnapshot(),
   ]);
 
   let watchlist: string[] = [];
   try { if (cfg?.watchlist) watchlist = JSON.parse(cfg.watchlist); } catch { /* noop */ }
+  const autoDiscover = process.env.AUTO_DISCOVER_SYMBOLS === "true" || process.env.AUTO_DISCOVER_SYMBOLS === "1";
+  const universeLabel = autoDiscover
+    ? `${process.env.MAX_SCREENER_SYMBOLS ?? "80"} auto-discovered futures symbols`
+    : `${watchlist.length} symbol${watchlist.length === 1 ? "" : "s"}`;
 
   // ----- hero stats -------------------------------------------------------
   const wallet = latestBalance?.totalWalletBalance ?? 0;
@@ -69,7 +76,7 @@ export default async function DashboardPage() {
         <h1 className="text-2xl font-semibold">Dashboard</h1>
         <p className="text-slate-400 text-sm">
           {cfg
-            ? `${watchlist.length} symbol${watchlist.length === 1 ? "" : "s"} · ${cfg.interval} · ${cfg.leverage}x ${cfg.marginType} · risk ${cfg.riskPercent}% · min conf ${cfg.minConfidence}`
+            ? `${universeLabel} · ${cfg.interval} · ${cfg.leverage}x ${cfg.marginType} · risk ${cfg.riskPercent}% · max ${cfg.maxConcurrent === 0 ? "unlimited" : cfg.maxConcurrent} positions`
             : "No active config — POST /api/config first."}
         </p>
       </header>
@@ -128,20 +135,26 @@ export default async function DashboardPage() {
             tone={winRate30d >= 0.5 ? "good" : winRate30d >= 0.3 ? "warn" : "bad"}
           />
           <StatTile
-            label="Open Positions"
-            value={positions.length}
-            sub={positions.length > 0 ? positions.map((p) => p.symbol).join(", ") : "none"}
-            tone={positions.length > 0 ? "accent" : "neutral"}
+            label="Running Positions"
+            value={livePositions.positions.length}
+            sub={livePositions.positions.length > 0 ? livePositions.positions.map((p) => `${p.symbol} ${p.side}`).join(", ") : "none"}
+            tone={livePositions.positions.length > 0 ? "accent" : "neutral"}
           />
         </div>
       </section>
 
+      <Card title="Running Positions (Live Binance)">
+        <LivePositionsTable initial={livePositions} />
+      </Card>
+
       {/* Watchlist */}
       <Card
-        title="Watchlist"
+        title={autoDiscover ? "Auto-Discovered Screener Universe" : "Watchlist"}
         action={<Link href="/calendar" className="text-xs text-accent hover:underline">View PnL calendar →</Link>}
       >
-        {watchlist.length === 0
+        {autoDiscover
+          ? <p className="text-slate-500 text-sm">Scanning up to {process.env.MAX_SCREENER_SYMBOLS ?? "80"} Binance USDT perpetual symbols from exchangeInfo.</p>
+          : watchlist.length === 0
           ? <p className="text-slate-500 text-sm">No watchlist — using env default.</p>
           : <div className="flex flex-wrap gap-2">
               {watchlist.map((s) => {

@@ -13,13 +13,15 @@
 import { prisma } from "@/lib/db";
 import { Card } from "@/components/Card";
 import { StatTile } from "@/components/StatTile";
+import { LivePositionsTable } from "@/components/LivePositionsTable";
+import { getLivePositionSnapshot } from "@/lib/binanceLive";
 
 export const dynamic = "force-dynamic";
 
 export default async function ReportsPage() {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
-  const [trades, screeningRuns, snapshotCount] = await Promise.all([
+  const [trades, screeningRuns, snapshotCount, livePositions] = await Promise.all([
     prisma.trade.findMany({
       where: { closedAt: { gte: since } },
       orderBy: { closedAt: "desc" },
@@ -36,6 +38,7 @@ export default async function ReportsPage() {
       },
     }),
     prisma.coinglassSnapshot.count({ where: { capturedAt: { gte: since } } }),
+    getLivePositionSnapshot(),
   ]);
 
   const closed = trades.filter((t) => typeof t.pnl === "number");
@@ -69,6 +72,42 @@ export default async function ReportsPage() {
         <StatTile label="Gross Profit"  value={grossProfit.toFixed(0)} tone="good" />
         <StatTile label="Gross Loss"    value={grossLoss.toFixed(0)} tone="bad" />
       </section>
+
+      <Card title="Running Positions Tree">
+        {livePositions.positions.length === 0 ? (
+          <p className="text-slate-500 text-sm">No live Binance positions.</p>
+        ) : (
+          <div className="space-y-2">
+            {livePositions.positions.map((p) => (
+              <details key={p.symbol} className="border border-line rounded-lg p-3" open>
+                <summary className="cursor-pointer list-none flex flex-wrap items-center justify-between gap-2">
+                  <span className="flex items-center gap-2">
+                    <span className="font-mono">{p.symbol}</span>
+                    <span className={p.side === "LONG" ? "pill-good" : "pill-bad"}>{p.side}</span>
+                  </span>
+                  <span className={`font-mono ${p.pnl >= 0 ? "text-success" : "text-danger"}`}>
+                    {p.pnl >= 0 ? "+" : ""}{p.pnl.toFixed(2)} USDT
+                    {p.roiPct != null && <span className="text-slate-500"> ({p.roiPct.toFixed(2)}%)</span>}
+                  </span>
+                </summary>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-x-6 mt-3">
+                  <div className="kv"><span>Size</span><span>{p.size.toLocaleString(undefined, { maximumFractionDigits: 6 })}</span></div>
+                  <div className="kv"><span>Entry</span><span>{p.entryPrice.toFixed(6)}</span></div>
+                  <div className="kv"><span>Break Even</span><span>{p.breakEvenPrice.toFixed(6)}</span></div>
+                  <div className="kv"><span>Mark</span><span>{p.markPrice.toFixed(6)}</span></div>
+                  <div className="kv"><span>Liq.</span><span>{p.liquidationPrice?.toFixed(6) ?? "-"}</span></div>
+                  <div className="kv"><span>Margin Ratio</span><span>{p.marginRatio == null ? "-" : `${p.marginRatio.toFixed(2)}%`}</span></div>
+                  <div className="kv"><span>Margin</span><span>{p.margin.toFixed(2)}</span></div>
+                  <div className="kv"><span>Notional</span><span>{p.notional.toFixed(2)}</span></div>
+                  <div className="kv"><span>Funding Rate</span><span>{p.fundingRate == null ? "-" : `${(p.fundingRate * 100).toFixed(4)}%`}</span></div>
+                  <div className="kv"><span>Est. Funding</span><span>{p.estFundingFee == null ? "-" : `${p.estFundingFee.toFixed(4)} USDT`}</span></div>
+                </div>
+              </details>
+            ))}
+            <LivePositionsTable initial={livePositions} dense />
+          </div>
+        )}
+      </Card>
 
       <Card title="PnL by Symbol">
         <table className="t">

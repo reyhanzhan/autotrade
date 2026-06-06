@@ -19,7 +19,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     <html lang="en">
       <body className="bg-bg text-slate-100 min-h-screen antialiased">
         <TopNav testnet={cfg?.testnet ?? null} enabled={cfg?.enabled ?? null} />
-        {children}
+        <div className="lg:pl-64">
+          {children}
+        </div>
       </body>
     </html>
   );

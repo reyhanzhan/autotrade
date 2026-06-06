@@ -43,31 +43,30 @@ export class RiskManager {
 
   /** Idempotent: applies leverage + margin type to a symbol the first time it
    *  is touched. Subsequent calls are no-ops. */
-  async ensureSettingsFor(symbol: string): Promise<boolean> {
-    if (this.prepared.has(symbol)) return true;
+  async ensureSettingsFor(symbol: string): Promise<void> {
+    if (this.prepared.has(symbol)) return;
     try {
       await this.client.setMarginType(symbol, this.cfg.marginType);
       await this.client.setLeverage(symbol, this.cfg.leverage);
       this.prepared.add(symbol);
       logger.info({ symbol, leverage: this.cfg.leverage, marginType: this.cfg.marginType }, "Symbol prepared");
-      return true;
     } catch (e) {
       await recordEvent("execution", "warn", "Failed to prepare symbol — skipping", {
         symbol, err: (e as Error).message,
       });
-      return false;
+      throw e;
     }
   }
 
   /** Execute a signal. The signal carries everything we need. */
-  async execute(signal: TradeSignal, signalRowId?: number): Promise<void> {
+  async execute(signal: TradeSignal, signalRowId?: number): Promise<boolean> {
     const symbol = signal.symbol;
 
     if (!env.LIVE_TRADING) {
       await recordEvent("execution", "info", "Dry-run signal (LIVE_TRADING=false)", {
         signalRowId, kind: signal.kind, symbol,
       });
-      return;
+      return false;
     }
 
     // GLOBAL concurrency cap. maxConcurrent <= 0 means unlimited internally;
@@ -75,27 +74,27 @@ export class RiskManager {
     const open = await prisma.position.count();
     if (this.cfg.maxConcurrent > 0 && open >= this.cfg.maxConcurrent) {
       await recordEvent("execution", "warn", "Global concurrency cap reached; skipping", { open });
-      return;
+      return false;
     }
 
     const existing = await prisma.position.findUnique({ where: { symbol } });
     if (existing) {
       await recordEvent("execution", "warn", "Position already open for symbol; skipping", { symbol });
-      return;
+      return false;
     }
 
-    if (!(await this.ensureSettingsFor(symbol))) return;
+    await this.ensureSettingsFor(symbol);
 
     const account = await this.client.accountInfo() as Record<string, unknown>;
     const equity = Number(account.totalWalletBalance ?? 0);
     const availableBalance = Number(account.availableBalance ?? equity);
     if (equity <= 0) {
       await recordEvent("execution", "error", "Account equity unavailable or zero", { account });
-      return;
+      return false;
     }
     if (availableBalance <= 0) {
       await recordEvent("execution", "error", "Available margin unavailable or zero", { availableBalance, equity });
-      return;
+      return false;
     }
 
     const filters = await this.client.exchangeInfo();
@@ -107,7 +106,7 @@ export class RiskManager {
     const stopDistance = Math.abs(signal.entryPrice - signal.stopLoss);
     if (stopDistance <= 0) {
       await recordEvent("execution", "error", "Invalid stop distance", { signal });
-      return;
+      return false;
     }
 
     const riskQty = riskUsdt / stopDistance;
@@ -119,7 +118,7 @@ export class RiskManager {
       await recordEvent("execution", "warn", "Computed qty below minQty; skipping", {
         riskQty, marginQty, qty, minQty, symbol,
       });
-      return;
+      return false;
     }
     if (rawQty < riskQty) {
       await recordEvent("execution", "warn", "Position size capped by available margin", {
@@ -213,6 +212,7 @@ export class RiskManager {
       signalId: signalRowId, symbol, side: signal.side, qty,
       entry: signal.entryPrice, sl: slPrice, tp: tpPrice,
     });
+    return true;
   }
 }
 

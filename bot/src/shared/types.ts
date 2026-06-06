@@ -74,5 +74,14 @@ export interface TradeSignal {
     structure: StructureState;
     orderBlock?: OrderBlock;
     fvg?: FairValueGap;
+    fibonacci?: {
+      impulseLow: number;
+      impulseHigh: number;
+      goldenLow: number;
+      goldenHigh: number;
+      invalidation: number;
+      structureTarget: number;
+      riskReward: number;
+    };
   };
 }

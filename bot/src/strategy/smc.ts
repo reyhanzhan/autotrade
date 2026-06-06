@@ -15,7 +15,7 @@
 //      the signal with entry/SL/TP).
 //
 //   4. Stop-loss is placed beyond the zone (1 ATR buffer); take-profit is
-//      computed as `riskReward × risk` (default 2.0 → 1:2 RR).
+//      computed as a Fibonacci risk extension (default 1.618R).
 //
 // This is a CONSERVATIVE skeleton — extend with: multi-timeframe confluence,
 // liquidity sweeps, optimal-trade-entry (OTE) fib pullbacks, killzone time
@@ -23,15 +23,15 @@
 // upon, so you can iterate using the EventLog/Signal tables.
 // ============================================================================
 
-import type { Candle, TradeSignal } from "../shared/types.js";
+import type { Candle, FairValueGap, OrderBlock, TradeSignal } from "../shared/types.js";
 import { analyzeStructure, DEFAULT_STRUCTURE_OPTS } from "./structure.js";
-import { findOrderBlocks, nearestUnmitigatedOB, DEFAULT_OB_OPTS } from "./orderBlock.js";
-import { findFairValueGaps, nearestUnfilledFVG, DEFAULT_FVG_OPTS } from "./fvg.js";
+import { findOrderBlocks, DEFAULT_OB_OPTS } from "./orderBlock.js";
+import { findFairValueGaps, DEFAULT_FVG_OPTS } from "./fvg.js";
 
 export interface SMCConfig {
   symbol: string;
   interval: string;
-  /** Risk-to-reward ratio for TP. Default 2.0 = 1:2 RR. */
+  /** Minimum risk-to-reward ratio for TP. Default 2.0 = 1:2 RR. */
   riskReward: number;
   /** Stop-loss buffer expressed as a fraction of ATR. */
   slBufferAtrMult: number;
@@ -66,84 +66,177 @@ export class SMCEngine {
     const structure = analyzeStructure(candles, DEFAULT_STRUCTURE_OPTS);
     if (structure.trend === "RANGING") return;
 
-    // We only act on a fresh BOS in the trend direction.
-    if (!structure.bos) return;
-    const side = structure.bos;
-    if (
-      (side === "LONG" && structure.trend !== "BULLISH") ||
-      (side === "SHORT" && structure.trend !== "BEARISH")
-    ) {
-      return;
-    }
+    const side = structure.trend === "BULLISH" ? "LONG" : "SHORT";
+    if ((side === "LONG" && structure.choch === "SHORT") || (side === "SHORT" && structure.choch === "LONG")) return;
 
     const obs = findOrderBlocks(candles, DEFAULT_OB_OPTS);
     const gaps = findFairValueGaps(candles, DEFAULT_FVG_OPTS);
-    const ob = nearestUnmitigatedOB(obs, side);
-    const fvg = nearestUnfilledFVG(gaps, side);
 
     const lastClosed = candles.findLast((c: Candle) => c.isClosed) ?? candles.at(-1)!;
     const lastPrice = lastClosed.close;
 
-    // Pick the entry zone: prefer OB; fall back to FVG. Both must sit between
-    // the last swing point and current price for a valid retracement entry.
-    const zone = pickEntryZone(side, lastPrice, ob, fvg);
+    const zone = pickTappedEntryZone(side, lastClosed, obs, gaps);
     if (!zone) return;
 
     const atr = computeATR(candles, this.cfg.atrPeriod);
     if (!atr) return;
     const buffer = atr * this.cfg.slBufferAtrMult;
 
-    let entryPrice: number, stopLoss: number, takeProfit: number;
-    if (side === "LONG") {
-      entryPrice = zone.high;                 // limit-style tap on the upper edge
-      stopLoss = zone.low - buffer;
-      const risk = entryPrice - stopLoss;
-      if (risk <= 0) return;
-      takeProfit = entryPrice + risk * this.cfg.riskReward;
-    } else {
-      entryPrice = zone.low;
-      stopLoss = zone.high + buffer;
-      const risk = stopLoss - entryPrice;
-      if (risk <= 0) return;
-      takeProfit = entryPrice - risk * this.cfg.riskReward;
-    }
+    const fibPlan = buildFibTradePlan(side, zone, structure, buffer, this.cfg.riskReward, lastPrice);
+    if (!fibPlan) return;
 
-    const confidence = scoreConfidence({ structure, hasOB: !!ob, hasFVG: !!fvg });
+    const confidence = scoreConfidence({
+      structure,
+      hasOB: zone.source === "OB",
+      hasFVG: zone.source === "FVG",
+      hasFib: true,
+    });
     if (confidence < this.cfg.minConfidence) return;
 
-    const kind =
-      ob && (!fvg || ob.index >= fvg.startIndex)
-        ? `OB_TAP_${side}`
-        : `FVG_TAP_${side}`;
+    const kind = `${zone.source}_TAP_${side}`;
 
     return {
       symbol: this.cfg.symbol,
       interval: this.cfg.interval,
       side,
-      kind,
-      entryPrice,
-      stopLoss,
-      takeProfit,
+      kind: `${kind}_FIB`,
+      entryPrice: fibPlan.entryPrice,
+      stopLoss: fibPlan.stopLoss,
+      takeProfit: fibPlan.takeProfit,
       confidence,
-      context: { structure, orderBlock: ob, fvg },
+      context: {
+        structure,
+        orderBlock: zone.source === "OB" ? zone.raw : undefined,
+        fvg: zone.source === "FVG" ? zone.raw : undefined,
+        fibonacci: fibPlan.fibonacci,
+      },
     };
   }
 }
 
 // ----- helpers ------------------------------------------------------------
 
-function pickEntryZone(
-  side: "LONG" | "SHORT",
-  lastPrice: number,
-  ob: { low: number; high: number; index: number } | undefined,
-  fvg: { low: number; high: number; startIndex: number } | undefined
-): { low: number; high: number } | undefined {
-  const valid = (zoneLow: number, zoneHigh: number) =>
-    side === "LONG" ? zoneHigh < lastPrice : zoneLow > lastPrice;
+type TappedZone =
+  | { low: number; high: number; source: "OB"; raw: OrderBlock; index: number }
+  | { low: number; high: number; source: "FVG"; raw: FairValueGap; index: number };
 
-  if (ob && valid(ob.low, ob.high)) return { low: ob.low, high: ob.high };
-  if (fvg && valid(fvg.low, fvg.high)) return { low: fvg.low, high: fvg.high };
-  return undefined;
+function pickTappedEntryZone(
+  side: "LONG" | "SHORT",
+  candle: Candle,
+  obs: OrderBlock[],
+  fvgs: FairValueGap[]
+): TappedZone | undefined {
+  const zones: TappedZone[] = [
+    ...obs
+      .filter((z) => z.side === side)
+      .map((z) => ({ low: z.low, high: z.high, source: "OB" as const, raw: z, index: z.index })),
+    ...fvgs
+      .filter((z) => z.side === side)
+      .map((z) => ({ low: z.low, high: z.high, source: "FVG" as const, raw: z, index: z.startIndex })),
+  ];
+
+  return zones
+    .filter((z) => candle.low <= z.high && candle.high >= z.low)
+    .sort((a, b) => {
+      if (a.source !== b.source) return a.source === "OB" ? -1 : 1;
+      return b.index - a.index;
+    })[0];
+}
+
+interface FibTradePlan {
+  entryPrice: number;
+  stopLoss: number;
+  takeProfit: number;
+  fibonacci: {
+    impulseLow: number;
+    impulseHigh: number;
+    goldenLow: number;
+    goldenHigh: number;
+    invalidation: number;
+    structureTarget: number;
+    riskReward: number;
+  };
+}
+
+function buildFibTradePlan(
+  side: "LONG" | "SHORT",
+  zone: { low: number; high: number },
+  structure: {
+    lastSwingHigh?: { price: number };
+    lastSwingLow?: { price: number };
+  },
+  buffer: number,
+  riskReward: number,
+  marketEntry: number
+): FibTradePlan | undefined {
+  const high = structure.lastSwingHigh?.price;
+  const low = structure.lastSwingLow?.price;
+  if (!high || !low || high <= low) return;
+
+  const range = high - low;
+  if (range <= 0) return;
+
+  if (side === "LONG") {
+    const fib50 = high - range * 0.5;
+    const fib618 = high - range * 0.618;
+    const fib786 = high - range * 0.786;
+    const goldenLow = Math.min(fib50, fib618);
+    const goldenHigh = Math.max(fib50, fib618);
+    const entryPrice = marketEntry;
+    if (entryPrice < goldenLow || entryPrice > goldenHigh) return;
+
+    const stopLoss = Math.min(zone.low - buffer, fib786 - buffer);
+    const risk = entryPrice - stopLoss;
+    if (risk <= 0) return;
+
+    const takeProfit = entryPrice + risk * riskReward;
+    if (takeProfit > high) return;
+
+    return {
+      entryPrice,
+      stopLoss,
+      takeProfit,
+      fibonacci: {
+        impulseLow: low,
+        impulseHigh: high,
+        goldenLow,
+        goldenHigh,
+        invalidation: fib786,
+        structureTarget: high,
+        riskReward,
+      },
+    };
+  }
+
+  const fib50 = low + range * 0.5;
+  const fib618 = low + range * 0.618;
+  const fib786 = low + range * 0.786;
+  const goldenLow = Math.min(fib50, fib618);
+  const goldenHigh = Math.max(fib50, fib618);
+  const entryPrice = marketEntry;
+  if (entryPrice < goldenLow || entryPrice > goldenHigh) return;
+
+  const stopLoss = Math.max(zone.high + buffer, fib786 + buffer);
+  const risk = stopLoss - entryPrice;
+  if (risk <= 0) return;
+
+  const takeProfit = entryPrice - risk * riskReward;
+  if (takeProfit < low) return;
+
+  return {
+    entryPrice,
+    stopLoss,
+    takeProfit,
+    fibonacci: {
+      impulseLow: low,
+      impulseHigh: high,
+      goldenLow,
+      goldenHigh,
+      invalidation: fib786,
+      structureTarget: low,
+      riskReward,
+    },
+  };
 }
 
 /** Wilder-style ATR. */
@@ -164,10 +257,12 @@ function scoreConfidence(parts: {
   structure: { trend: string; bos?: string };
   hasOB: boolean;
   hasFVG: boolean;
+  hasFib: boolean;
 }): number {
   let score = 0;
-  if (parts.structure.bos) score += 0.4;                       // confirmed structure
-  if (parts.hasOB && parts.hasFVG) score += 0.4;                // confluence
+  if (parts.hasFib) score += 0.3;
+  if (parts.structure.bos) score += 0.1;
+  if (parts.hasOB && parts.hasFVG) score += 0.35;
   else if (parts.hasOB || parts.hasFVG) score += 0.25;
   if (parts.structure.trend !== "RANGING") score += 0.2;
   return Math.min(1, score);
