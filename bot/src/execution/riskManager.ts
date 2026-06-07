@@ -152,43 +152,57 @@ export class RiskManager {
       },
     });
 
-    // 2) Stop-loss (STOP_MARKET, closePosition)
-    const slPrice = roundStep(signal.stopLoss, priceStep);
-    const slResp = await this.client.placeOrder({
-      symbol, side: exitSide, type: "STOP_MARKET",
-      stopPrice: slPrice, closePosition: true, workingType: "MARK_PRICE",
-      newClientOrderId: `${clientPrefix}-sl`,
-    });
-    await prisma.order.create({
-      data: {
-        exchangeOrderId: String(slResp.orderId ?? ""),
-        clientOrderId: `${clientPrefix}-sl`,
+    let slPrice = 0;
+    let tpPrice = 0;
+    try {
+      // 2) Stop-loss (STOP_MARKET, closePosition)
+      slPrice = roundStep(signal.stopLoss, priceStep);
+      const slResp = await this.client.placeOrder({
         symbol, side: exitSide, type: "STOP_MARKET",
-        status: String(slResp.status ?? "NEW"),
-        stopPrice: slPrice, quantity: qty, closePosition: true,
-        signalId: signalRowId ?? null,
-        rawResponse: JSON.stringify(slResp),
-      },
-    });
+        stopPrice: slPrice, closePosition: true, workingType: "MARK_PRICE",
+        newClientOrderId: `${clientPrefix}-sl`,
+      });
+      await prisma.order.create({
+        data: {
+          exchangeOrderId: String(slResp.orderId ?? ""),
+          clientOrderId: `${clientPrefix}-sl`,
+          symbol, side: exitSide, type: "STOP_MARKET",
+          status: String(slResp.status ?? "NEW"),
+          stopPrice: slPrice, quantity: qty, closePosition: true,
+          signalId: signalRowId ?? null,
+          rawResponse: JSON.stringify(slResp),
+        },
+      });
 
-    // 3) Take-profit (TAKE_PROFIT_MARKET, closePosition)
-    const tpPrice = roundStep(signal.takeProfit, priceStep);
-    const tpResp = await this.client.placeOrder({
-      symbol, side: exitSide, type: "TAKE_PROFIT_MARKET",
-      stopPrice: tpPrice, closePosition: true, workingType: "MARK_PRICE",
-      newClientOrderId: `${clientPrefix}-tp`,
-    });
-    await prisma.order.create({
-      data: {
-        exchangeOrderId: String(tpResp.orderId ?? ""),
-        clientOrderId: `${clientPrefix}-tp`,
+      // 3) Take-profit (TAKE_PROFIT_MARKET, closePosition)
+      tpPrice = roundStep(signal.takeProfit, priceStep);
+      const tpResp = await this.client.placeOrder({
         symbol, side: exitSide, type: "TAKE_PROFIT_MARKET",
-        status: String(tpResp.status ?? "NEW"),
-        stopPrice: tpPrice, quantity: qty, closePosition: true,
-        signalId: signalRowId ?? null,
-        rawResponse: JSON.stringify(tpResp),
-      },
-    });
+        stopPrice: tpPrice, closePosition: true, workingType: "MARK_PRICE",
+        newClientOrderId: `${clientPrefix}-tp`,
+      });
+      await prisma.order.create({
+        data: {
+          exchangeOrderId: String(tpResp.orderId ?? ""),
+          clientOrderId: `${clientPrefix}-tp`,
+          symbol, side: exitSide, type: "TAKE_PROFIT_MARKET",
+          status: String(tpResp.status ?? "NEW"),
+          stopPrice: tpPrice, quantity: qty, closePosition: true,
+          signalId: signalRowId ?? null,
+          rawResponse: JSON.stringify(tpResp),
+        },
+      });
+    } catch (err) {
+      await recordEvent("execution", "error", "Protective bracket failed after entry - closing position", {
+        signalId: signalRowId,
+        symbol,
+        side: signal.side,
+        qty,
+        err: (err as Error).message,
+      });
+      await this.emergencyClose(symbol, exitSide, qty, `${clientPrefix}-panic`, signalRowId);
+      throw err;
+    }
 
     await prisma.position.upsert({
       where: { symbol },
@@ -213,6 +227,52 @@ export class RiskManager {
       entry: signal.entryPrice, sl: slPrice, tp: tpPrice,
     });
     return true;
+  }
+
+  private async emergencyClose(
+    symbol: string,
+    side: "BUY" | "SELL",
+    quantity: number,
+    clientOrderId: string,
+    signalRowId?: number
+  ): Promise<void> {
+    try { await this.client.cancelAllOpenOrders(symbol); } catch { /* tolerate cleanup failure */ }
+    try {
+      const closeResp = await this.client.placeOrder({
+        symbol,
+        side,
+        type: "MARKET",
+        quantity,
+        reduceOnly: true,
+        newClientOrderId: clientOrderId,
+      });
+      await prisma.order.create({
+        data: {
+          exchangeOrderId: String(closeResp.orderId ?? ""),
+          clientOrderId,
+          symbol,
+          side,
+          type: "MARKET",
+          status: String(closeResp.status ?? "NEW"),
+          quantity,
+          reduceOnly: true,
+          signalId: signalRowId ?? null,
+          rawResponse: JSON.stringify(closeResp),
+        },
+      });
+      await recordEvent("execution", "warn", "Emergency close order placed after bracket failure", {
+        signalId: signalRowId,
+        symbol,
+        qty: quantity,
+      });
+    } catch (closeErr) {
+      await recordEvent("execution", "error", "Emergency close failed - manual intervention required", {
+        signalId: signalRowId,
+        symbol,
+        qty: quantity,
+        err: (closeErr as Error).message,
+      });
+    }
   }
 }
 

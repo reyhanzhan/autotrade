@@ -56,6 +56,7 @@ export class Screener {
   private readonly engines = new Map<string, SMCEngine>();
   private readonly candidates = new Map<string, CachedCandidate>();
   private readonly coinglass: CoinglassClient;
+  private screeningPassInFlight = false;
 
   constructor(private readonly opts: ScreenerOptions, coinglass?: CoinglassClient) {
     this.coinglass = coinglass ?? new CoinglassClient();
@@ -119,6 +120,9 @@ export class Screener {
 
   /** Manually trigger a screening pass against the current candidate cache. */
   async runScreeningPass(excludedSymbols = new Set<string>()): Promise<ScreeningResult | undefined> {
+    if (this.screeningPassInFlight) return undefined;
+    this.screeningPassInFlight = true;
+    try {
     const entries = Array.from(this.candidates.entries())
       .filter(([sym]) => !excludedSymbols.has(sym));
     if (entries.length === 0) return undefined;
@@ -210,6 +214,9 @@ export class Screener {
         finalConfidence: winner.finalConfidence,
       },
     };
+    } finally {
+      this.screeningPassInFlight = false;
+    }
   }
 }
 
