@@ -151,6 +151,20 @@ export class BinanceStream extends EventEmitter {
     return this.buffers.get(symbol.toUpperCase()) ?? [];
   }
 
+  /** Seed historical candles before live WebSocket updates arrive. */
+  seedCandles(symbol: string, candles: Candle[]): void {
+    const key = symbol.toUpperCase();
+    const max = this.opts.bufferSize ?? 500;
+    const deduped = new Map<number, Candle>();
+    for (const candle of candles) deduped.set(candle.openTime, candle);
+    this.buffers.set(
+      key,
+      Array.from(deduped.values())
+        .sort((a, b) => a.openTime - b.openTime)
+        .slice(-max)
+    );
+  }
+
   /** All tracked symbols. */
   symbols(): string[] {
     return Array.from(this.buffers.keys());

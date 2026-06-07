@@ -21,6 +21,7 @@
 import axios, { AxiosError, type AxiosInstance, type AxiosResponse } from "axios";
 import { createHmac } from "node:crypto";
 import { logger } from "../shared/logger.js";
+import type { Candle } from "../shared/types.js";
 
 export interface BinanceCredentials {
   apiKey: string;
@@ -186,6 +187,30 @@ export class BinanceFuturesClient {
     for (const s of r.symbols) map.set(s.symbol as string, s);
     this.filtersCache = map;
     return map;
+  }
+
+  /** Historical K-lines used to warm the in-memory WebSocket buffers on boot. */
+  async klines(symbol: string, interval: string, limit = 100): Promise<Candle[]> {
+    const rows = await this.publicGet<unknown[]>("/fapi/v1/klines", {
+      symbol,
+      interval,
+      limit,
+    });
+    const now = Date.now();
+    return rows.map((row) => {
+      const r = row as unknown[];
+      const closeTime = Number(r[6]);
+      return {
+        openTime: Number(r[0]),
+        closeTime,
+        open: Number(r[1]),
+        high: Number(r[2]),
+        low: Number(r[3]),
+        close: Number(r[4]),
+        volume: Number(r[5]),
+        isClosed: closeTime <= now,
+      };
+    });
   }
 
   // ---------- INTERNALS -------------------------------------------------

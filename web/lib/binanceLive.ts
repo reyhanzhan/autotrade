@@ -4,7 +4,7 @@ import { createHmac } from "node:crypto";
 import { prisma } from "@/lib/db";
 import { decryptSecret } from "@/lib/crypto";
 
-const CACHE_MS = 30_000;
+const CACHE_MS = Number(process.env.LIVE_POSITIONS_CACHE_MS ?? 300_000);
 
 export interface LivePosition {
   symbol: string;
@@ -35,6 +35,14 @@ export interface LivePositionSnapshot {
 let cache: { expiresAt: number; snapshot: LivePositionSnapshot } | undefined;
 
 export async function getLivePositionSnapshot(): Promise<LivePositionSnapshot> {
+  if (process.env.LIVE_POSITIONS_ENABLED === "false") {
+    return {
+      positions: [],
+      updatedAt: new Date().toISOString(),
+      error: "Live Binance positions disabled by LIVE_POSITIONS_ENABLED=false",
+    };
+  }
+
   if (cache && Date.now() < cache.expiresAt) return cache.snapshot;
 
   try {

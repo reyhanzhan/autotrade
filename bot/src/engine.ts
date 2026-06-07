@@ -91,17 +91,27 @@ export class TradingEngine {
     const coinglass = new CoinglassClient();
     this.screener = new Screener({ interval, symbols: watchlist, minConfidence }, coinglass);
 
-    this.reconciler = new PositionReconciler(client);
-    this.reconciler.start();
+    if (env.ENABLE_RECONCILER) {
+      this.reconciler = new PositionReconciler(client);
+      this.reconciler.start();
+    } else {
+      await recordEvent("reconciler", "warn", "Position reconciler disabled by env");
+    }
 
-    this.balancePoller = new BalancePoller(client, cfg.testnet);
-    this.balancePoller.start();
+    if (env.ENABLE_BALANCE_POLLER) {
+      this.balancePoller = new BalancePoller(client, cfg.testnet);
+      this.balancePoller.start();
+    } else {
+      await recordEvent("balance", "warn", "Balance poller disabled by env");
+    }
 
     this.stream = new BinanceStream({
       subscriptions: watchlist.map((s) => ({ symbol: s, interval })),
       bufferSize: env.CANDLE_HISTORY,
       testnet: cfg.testnet,
     });
+
+    await this.warmupStreamBuffers(client, watchlist, interval);
 
     this.stream.on("candle", (symbol: string, closed: Candle, all: Candle[]) => {
       this.onClosedCandle(symbol, closed, all).catch(async (err) => {
@@ -187,6 +197,39 @@ export class TradingEngine {
     this.reconciler?.stop();
     this.stream?.close();
     await prisma.$disconnect();
+  }
+
+  private async warmupStreamBuffers(
+    client: BinanceFuturesClient,
+    symbols: string[],
+    interval: string
+  ): Promise<void> {
+    if (!this.stream || env.WARMUP_CANDLES === 0) return;
+
+    const limit = Math.min(env.WARMUP_CANDLES, env.CANDLE_HISTORY);
+    let loaded = 0;
+    let failed = 0;
+
+    for (const symbol of symbols) {
+      try {
+        const candles = await client.klines(symbol, interval, limit);
+        this.stream.seedCandles(symbol, candles);
+        loaded++;
+      } catch (err) {
+        failed++;
+        const message = (err as Error).message;
+        logger.warn({ symbol, err: message }, "Historical candle warmup failed");
+        if (/status=418|code=-1003|rate-limited/i.test(message)) break;
+      }
+    }
+
+    await recordEvent(failed ? "engine" : "websocket", failed ? "warn" : "info", "Historical candle warmup complete", {
+      loaded,
+      failed,
+      symbols: symbols.length,
+      interval,
+      limit,
+    });
   }
 
   private cooldownSymbols(): Set<string> {
