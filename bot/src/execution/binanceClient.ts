@@ -129,6 +129,9 @@ export class BinanceFuturesClient {
     if (this.orderCount >= BinanceFuturesClient.ORDER_CAP_PER_MIN) {
       throw new Error("Local order rate-limit reached; aborting placeOrder.");
     }
+    if (isAlgoOrderType(p.type)) {
+      return await this.placeAlgoOrder(p);
+    }
     const body: Record<string, unknown> = {
       symbol: p.symbol,
       side: p.side,
@@ -148,6 +151,34 @@ export class BinanceFuturesClient {
     return res as Record<string, unknown>;
   }
 
+  /** TP/SL conditional orders now go through Binance's Algo Order endpoint. */
+  private async placeAlgoOrder(p: PlaceOrderParams): Promise<Record<string, unknown>> {
+    const body: Record<string, unknown> = {
+      algoType: "CONDITIONAL",
+      symbol: p.symbol,
+      side: p.side,
+      type: p.type,
+      ...(p.positionSide && { positionSide: p.positionSide }),
+      ...(p.quantity !== undefined && { quantity: p.quantity }),
+      ...(p.price !== undefined && { price: p.price }),
+      ...(p.stopPrice !== undefined && { triggerPrice: p.stopPrice }),
+      ...(p.closePosition !== undefined && { closePosition: p.closePosition }),
+      ...(p.reduceOnly !== undefined && { reduceOnly: p.reduceOnly }),
+      ...(p.timeInForce && { timeInForce: p.timeInForce }),
+      ...(p.workingType && { workingType: p.workingType }),
+      ...(p.newClientOrderId && { clientAlgoId: p.newClientOrderId }),
+    };
+    const res = await this.signedPost<Record<string, unknown>>("/fapi/v1/algoOrder", body);
+    this.orderCount++;
+    return {
+      ...res,
+      orderId: res.algoId,
+      clientOrderId: res.clientAlgoId,
+      status: res.algoStatus,
+      stopPrice: res.triggerPrice,
+    };
+  }
+
   /** Cancel a single order. */
   async cancelOrder(symbol: string, orderId?: number, clientOrderId?: string): Promise<unknown> {
     const params: Record<string, unknown> = { symbol };
@@ -161,10 +192,23 @@ export class BinanceFuturesClient {
     return this.signedDelete("/fapi/v1/allOpenOrders", { symbol });
   }
 
+  async cancelAllOpenAlgoOrders(symbol: string): Promise<unknown> {
+    return this.signedDelete("/fapi/v1/algoOpenOrders", { symbol });
+  }
+
   /** Query a single order by exchange orderId. Used by the reconciler to
    *  detect which protective order (SL vs TP) actually filled. */
   async queryOrder(symbol: string, orderId: number): Promise<Record<string, unknown>> {
     return this.signedGet("/fapi/v1/order", { symbol, orderId });
+  }
+
+  async queryAlgoOrder(algoId: number): Promise<Record<string, unknown>> {
+    const res = await this.signedGet<Record<string, unknown>>("/fapi/v1/algoOrder", { algoId });
+    return {
+      ...res,
+      orderId: res.algoId,
+      status: res.algoStatus,
+    };
   }
 
   /** User-account trades for a symbol, optionally since `startTimeMs`.
@@ -339,4 +383,8 @@ export class BinanceFuturesClient {
       throw new Error(`Rate-limit headroom exceeded (${this.usedWeight}/${BinanceFuturesClient.WEIGHT_CAP}); sleep ${sleepMs}ms`);
     }
   }
+}
+
+function isAlgoOrderType(type: PlaceOrderParams["type"]): boolean {
+  return type === "STOP_MARKET" || type === "TAKE_PROFIT_MARKET";
 }

@@ -100,7 +100,7 @@ export class RiskManager {
     const filters = await this.client.exchangeInfo();
     const sym = filters.get(symbol);
     if (!sym) throw new Error(`Symbol filters missing for ${symbol}`);
-    const { qtyStep, minQty, priceStep } = parseFilters(sym);
+    const { qtyStep, minQty, maxQty, priceStep } = parseFilters(sym);
 
     const riskUsdt = equity * (this.cfg.riskPercent / 100);
     const stopDistance = Math.abs(signal.entryPrice - signal.stopLoss);
@@ -112,7 +112,8 @@ export class RiskManager {
     const riskQty = riskUsdt / stopDistance;
     const maxNotional = availableBalance * this.cfg.leverage * MAX_MARGIN_USAGE;
     const marginQty = maxNotional / signal.entryPrice;
-    const rawQty = Math.min(riskQty, marginQty);
+    const exchangeQty = maxQty > 0 ? maxQty : Number.POSITIVE_INFINITY;
+    const rawQty = Math.min(riskQty, marginQty, exchangeQty);
     const qty = roundStep(rawQty, qtyStep);
     if (qty < minQty) {
       await recordEvent("execution", "warn", "Computed qty below minQty; skipping", {
@@ -125,6 +126,7 @@ export class RiskManager {
         symbol,
         riskQty,
         marginQty,
+        exchangeQty: Number.isFinite(exchangeQty) ? exchangeQty : null,
         qty,
         availableBalance,
         leverage: this.cfg.leverage,
@@ -237,6 +239,7 @@ export class RiskManager {
     signalRowId?: number
   ): Promise<void> {
     try { await this.client.cancelAllOpenOrders(symbol); } catch { /* tolerate cleanup failure */ }
+    try { await this.client.cancelAllOpenAlgoOrders(symbol); } catch { /* tolerate cleanup failure */ }
     try {
       const closeResp = await this.client.placeOrder({
         symbol,
@@ -278,16 +281,17 @@ export class RiskManager {
 
 // ----- filter parsing -----------------------------------------------------
 
-interface ParsedFilters { qtyStep: number; minQty: number; priceStep: number; }
+interface ParsedFilters { qtyStep: number; minQty: number; maxQty: number; priceStep: number; }
 
 function parseFilters(sym: Record<string, unknown>): ParsedFilters {
   const arr = (sym.filters as Array<Record<string, unknown>>) ?? [];
-  const lot = arr.find((f) => f.filterType === "LOT_SIZE")
-            ?? arr.find((f) => f.filterType === "MARKET_LOT_SIZE");
+  const marketLot = arr.find((f) => f.filterType === "MARKET_LOT_SIZE");
+  const lot = marketLot ?? arr.find((f) => f.filterType === "LOT_SIZE");
   const price = arr.find((f) => f.filterType === "PRICE_FILTER");
   return {
     qtyStep: Number(lot?.stepSize ?? 0.001),
     minQty: Number(lot?.minQty ?? 0.001),
+    maxQty: Number(lot?.maxQty ?? 0),
     priceStep: Number(price?.tickSize ?? 0.01),
   };
 }

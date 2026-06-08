@@ -123,6 +123,7 @@ export class PositionReconciler {
 
     // Cancel any leftover protective orders (the unfilled one of SL/TP).
     try { await this.client.cancelAllOpenOrders(pos.symbol); } catch { /* tolerate */ }
+    try { await this.client.cancelAllOpenAlgoOrders(pos.symbol); } catch { /* tolerate */ }
 
     await prisma.position.delete({ where: { id: pos.id } });
 
@@ -141,7 +142,7 @@ export class PositionReconciler {
     for (const o of orders) {
       if (!o.exchangeOrderId) continue;
       try {
-        const live = await this.client.queryOrder(symbol, Number(o.exchangeOrderId));
+        const live = await this.client.queryAlgoOrder(Number(o.exchangeOrderId));
         await prisma.order.update({
           where: { id: o.id },
           data: { status: String(live.status ?? o.status), rawResponse: JSON.stringify(live) },
