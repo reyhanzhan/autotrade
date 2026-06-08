@@ -25,6 +25,8 @@ const schema = z.object({
   DEFAULT_RISK_PERCENT: z.coerce.number().min(0.1).max(50).default(1.0),
   CANDLE_HISTORY: z.coerce.number().int().min(50).max(1500).default(500),
   WARMUP_CANDLES: z.coerce.number().int().min(0).max(1500).default(100),
+  ENABLE_MTF_CONFIRMATION: truthy.default("true"),
+  MTF_CONFIRMATION_INTERVALS: z.string().default("1h,4h"),
   MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.6),
   LIVE_TRADING: truthy.default("false"),
   ENABLE_RECONCILER: truthy.default("true"),
@@ -64,6 +66,11 @@ export const env = {
   ),
   /** True only if Coinglass key is present. */
   hasCoinglass: parsed.data.COINGLASS_API_KEY.length > 0,
+  mtfConfirmationIntervals: dedupe(
+    parsed.data.MTF_CONFIRMATION_INTERVALS.split(",")
+      .map((s) => s.trim())
+      .filter((s) => schema.shape.INTERVAL.safeParse(s).success)
+  ),
 };
 
 export const BINANCE_ENDPOINTS = {

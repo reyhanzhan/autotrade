@@ -27,12 +27,14 @@ import { resolveExchangeUniverse, resolveWatchlist } from "./screener/symbols.js
 import { CoinglassClient } from "./external/coinglass.js";
 import { PositionReconciler } from "./reconciler/positionReconciler.js";
 import { BalancePoller } from "./reconciler/balancePoller.js";
-import type { Candle } from "./shared/types.js";
+import type { Candle, Side, StructureState, TradeSignal } from "./shared/types.js";
+import { analyzeStructure, DEFAULT_STRUCTURE_OPTS } from "./strategy/structure.js";
 
 export class TradingEngine {
   private stream?: BinanceStream;
   private screener?: Screener;
   private risk?: RiskManager;
+  private client?: BinanceFuturesClient;
   private reconciler?: PositionReconciler;
   private balancePoller?: BalancePoller;
   private lastEvaluatedAt = new Map<string, number>(); // symbol → last candle openTime
@@ -52,6 +54,7 @@ export class TradingEngine {
     const apiSecret = decryptSecret({ cipher: cfg.apiSecretCipher, iv: cfg.apiSecretIv, tag: cfg.apiSecretTag });
 
     const client = new BinanceFuturesClient({ apiKey, apiSecret }, { testnet: cfg.testnet });
+    this.client = client;
 
     // Clock-skew sanity.
     try {
@@ -164,8 +167,34 @@ export class TradingEngine {
 
     this.executionInFlight = true;
     try {
+      const mtf = await this.confirmMultiTimeframe(signal);
+      if (!mtf.accepted) {
+        await recordEvent("strategy", "warn", "MTF confirmation rejected signal", {
+          signalId: sigRow?.id,
+          symbol: signal.symbol,
+          side: signal.side,
+          requiredTrend: mtf.requiredTrend,
+          confirmations: mtf.confirmations,
+          reason: mtf.reason,
+        });
+        this.setExecutionCooldown(
+          signal.symbol,
+          env.FAILED_TRADE_COOLDOWN_MS,
+          "Skipped execution cooldown started",
+          { reason: mtf.reason }
+        );
+        return;
+      }
+
       const placed = await this.risk.execute(
-        { ...signal, confidence: finalConfidence },
+        {
+          ...signal,
+          confidence: finalConfidence,
+          context: {
+            ...signal.context,
+            multiTimeframe: mtf.confirmations,
+          },
+        },
         sigRow?.id
       );
       this.setExecutionCooldown(
@@ -190,6 +219,50 @@ export class TradingEngine {
     } finally {
       this.executionInFlight = false;
     }
+  }
+
+  private async confirmMultiTimeframe(signal: TradeSignal): Promise<{
+    accepted: boolean;
+    requiredTrend: StructureState["trend"];
+    confirmations: Array<{ interval: string; trend: StructureState["trend"]; requiredTrend: StructureState["trend"] }>;
+    reason?: string;
+  }> {
+    const intervals = env.ENABLE_MTF_CONFIRMATION ? env.mtfConfirmationIntervals : [];
+    const requiredTrend = trendForSide(signal.side);
+    if (intervals.length === 0) {
+      return { accepted: true, requiredTrend, confirmations: [] };
+    }
+
+    if (!this.client) {
+      return {
+        accepted: false,
+        requiredTrend,
+        confirmations: [],
+        reason: "Binance client unavailable for MTF confirmation",
+      };
+    }
+
+    const confirmations: Array<{ interval: string; trend: StructureState["trend"]; requiredTrend: StructureState["trend"] }> = [];
+    for (const interval of intervals) {
+      const candles = await this.client.klines(signal.symbol, interval, Math.min(env.WARMUP_CANDLES, env.CANDLE_HISTORY));
+      const structure = analyzeStructure(candles, DEFAULT_STRUCTURE_OPTS);
+      confirmations.push({ interval, trend: structure.trend, requiredTrend });
+      if (structure.trend !== requiredTrend) {
+        return {
+          accepted: false,
+          requiredTrend,
+          confirmations,
+          reason: `${interval} trend ${structure.trend} does not confirm ${signal.side}`,
+        };
+      }
+    }
+
+    await recordEvent("strategy", "info", "MTF confirmation accepted signal", {
+      symbol: signal.symbol,
+      side: signal.side,
+      confirmations,
+    });
+    return { accepted: true, requiredTrend, confirmations };
   }
 
   async stop(): Promise<void> {
@@ -280,4 +353,8 @@ function cooldownMsForError(err: unknown, fallbackMs: number): number {
 function globalCooldownUntilForError(err: unknown): number | undefined {
   const ms = cooldownMsForError(err, 0);
   return ms > 0 ? Date.now() + ms : undefined;
+}
+
+function trendForSide(side: Side): StructureState["trend"] {
+  return side === "LONG" ? "BULLISH" : "BEARISH";
 }

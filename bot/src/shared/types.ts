@@ -83,5 +83,10 @@ export interface TradeSignal {
       structureTarget: number;
       riskReward: number;
     };
+    multiTimeframe?: Array<{
+      interval: string;
+      trend: StructureState["trend"];
+      requiredTrend: StructureState["trend"];
+    }>;
   };
 }
