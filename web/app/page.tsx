@@ -10,7 +10,9 @@ import { Card } from "@/components/Card";
 import { StatTile } from "@/components/StatTile";
 import { Sparkline } from "@/components/Sparkline";
 import { LivePositionsTable } from "@/components/LivePositionsTable";
+import { AutoRefresh } from "@/components/AutoRefresh";
 import { getLivePositionSnapshot } from "@/lib/binanceLive";
+import { formatWibDateTime, formatWibTime } from "@/lib/time";
 
 export const dynamic = "force-dynamic";
 
@@ -71,6 +73,7 @@ export default async function DashboardPage() {
 
   return (
     <main className="max-w-6xl mx-auto p-6 space-y-6">
+      <AutoRefresh />
       {/* Header */}
       <header>
         <h1 className="text-2xl font-semibold">Dashboard</h1>
@@ -105,7 +108,7 @@ export default async function DashboardPage() {
                 <Sparkline points={sparkPoints} color="auto" width={280} height={56} />
               </div>
               <p className="text-[10px] text-slate-500 mt-1">
-                Last update: {new Date(latestBalance.capturedAt).toLocaleTimeString()} · {balanceHistory.length} snapshots
+                Last update: {formatWibTime(latestBalance.capturedAt)} · {balanceHistory.length} snapshots
               </p>
             </>
           ) : (
@@ -207,7 +210,7 @@ export default async function DashboardPage() {
             <tbody>
               {recentSignals.map((s) => (
                 <tr key={s.id}>
-                  <td className="text-slate-400 text-xs">{new Date(s.createdAt).toLocaleTimeString()}</td>
+                  <td className="text-slate-400 text-xs">{formatWibTime(s.createdAt)}</td>
                   <td className="font-mono">{s.symbol}</td>
                   <td><span className={s.side === "LONG" ? "pill-good" : "pill-bad"}>{s.kind}</span></td>
                   <td className="text-right font-mono">{(s.baseConfidence * 100).toFixed(0)}%</td>
@@ -235,7 +238,7 @@ export default async function DashboardPage() {
             : recentRuns.map((r) => (
                 <div key={r.id} className="border-b border-line py-2 last:border-0">
                   <div className="flex items-center justify-between text-sm">
-                    <span className="text-slate-300">{new Date(r.runAt).toLocaleString()}</span>
+                    <span className="text-slate-300">{formatWibDateTime(r.runAt)}</span>
                     <span className="text-xs text-slate-500">{r.candidateCount} candidates</span>
                   </div>
                   <div className="text-xs mt-1">
@@ -253,7 +256,7 @@ export default async function DashboardPage() {
           <ul className="text-sm space-y-1 max-h-72 overflow-auto font-mono">
             {recentEvents.map((e) => (
               <li key={e.id} className="text-xs">
-                <span className="text-slate-600">{new Date(e.createdAt).toLocaleTimeString()}</span>{" "}
+                <span className="text-slate-600">{formatWibTime(e.createdAt)}</span>{" "}
                 <span className={e.level === "error" ? "text-danger" : e.level === "warn" ? "text-yellow-400" : "text-slate-300"}>
                   [{e.source}] {e.message}
                 </span>
