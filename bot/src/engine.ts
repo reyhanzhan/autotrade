@@ -169,6 +169,7 @@ export class TradingEngine {
     try {
       const mtf = await this.confirmMultiTimeframe(signal);
       if (!mtf.accepted) {
+        await this.attachMtfToSignal(sigRow?.id, mtf.confirmations);
         await recordEvent("strategy", "warn", "MTF confirmation rejected signal", {
           signalId: sigRow?.id,
           symbol: signal.symbol,
@@ -185,6 +186,7 @@ export class TradingEngine {
         );
         return;
       }
+      await this.attachMtfToSignal(sigRow?.id, mtf.confirmations);
 
       const placed = await this.risk.execute(
         {
@@ -219,6 +221,25 @@ export class TradingEngine {
     } finally {
       this.executionInFlight = false;
     }
+  }
+
+  private async attachMtfToSignal(
+    signalId: number | undefined,
+    confirmations: Array<{ interval: string; trend: StructureState["trend"]; requiredTrend: StructureState["trend"] }>
+  ): Promise<void> {
+    if (!signalId) return;
+    const row = await prisma.signal.findUnique({ where: { id: signalId }, select: { payload: true } });
+    if (!row) return;
+    let payload: Record<string, unknown> = {};
+    try {
+      payload = row.payload ? JSON.parse(row.payload) as Record<string, unknown> : {};
+    } catch {
+      payload = {};
+    }
+    await prisma.signal.update({
+      where: { id: signalId },
+      data: { payload: JSON.stringify({ ...payload, multiTimeframe: confirmations }) },
+    });
   }
 
   private async confirmMultiTimeframe(signal: TradeSignal): Promise<{

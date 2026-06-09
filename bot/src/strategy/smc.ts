@@ -69,10 +69,12 @@ export class SMCEngine {
     const side = structure.trend === "BULLISH" ? "LONG" : "SHORT";
     if ((side === "LONG" && structure.choch === "SHORT") || (side === "SHORT" && structure.choch === "LONG")) return;
 
-    const obs = findOrderBlocks(candles, DEFAULT_OB_OPTS);
-    const gaps = findFairValueGaps(candles, DEFAULT_FVG_OPTS);
-
     const lastClosed = candles.findLast((c: Candle) => c.isClosed) ?? candles.at(-1)!;
+    const preTapCandles = candles.filter((c) => c.openTime < lastClosed.openTime);
+    if (preTapCandles.length < 50) return;
+
+    const obs = findOrderBlocks(preTapCandles, DEFAULT_OB_OPTS);
+    const gaps = findFairValueGaps(preTapCandles, DEFAULT_FVG_OPTS);
     const lastPrice = lastClosed.close;
 
     const zone = pickTappedEntryZone(side, lastClosed, obs, gaps);
@@ -128,10 +130,10 @@ function pickTappedEntryZone(
 ): TappedZone | undefined {
   const zones: TappedZone[] = [
     ...obs
-      .filter((z) => z.side === side)
+      .filter((z) => z.side === side && !z.mitigated)
       .map((z) => ({ low: z.low, high: z.high, source: "OB" as const, raw: z, index: z.index })),
     ...fvgs
-      .filter((z) => z.side === side)
+      .filter((z) => z.side === side && !z.filled)
       .map((z) => ({ low: z.low, high: z.high, source: "FVG" as const, raw: z, index: z.startIndex })),
   ];
 

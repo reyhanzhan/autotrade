@@ -184,6 +184,8 @@ export class Screener {
             structure: c.context.structure,
             orderBlock: c.context.orderBlock,
             fvg: c.context.fvg,
+            fibonacci: c.context.fibonacci,
+            multiTimeframe: c.context.multiTimeframe,
             confluence: s.confluence,
           }),
           screeningRunId: run.id,
