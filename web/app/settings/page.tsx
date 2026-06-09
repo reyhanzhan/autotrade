@@ -15,6 +15,9 @@ export default async function SettingsPage() {
   const cfg = await prisma.botConfig.findFirst({ orderBy: { id: "asc" } });
   let watchlist: string[] = [];
   try { if (cfg?.watchlist) watchlist = JSON.parse(cfg.watchlist); } catch { /* noop */ }
+  const autoDiscover = process.env.AUTO_DISCOVER_SYMBOLS === "true" || process.env.AUTO_DISCOVER_SYMBOLS === "1";
+  const maxScreenerSymbols = process.env.MAX_SCREENER_SYMBOLS ?? "80";
+  const min24hQuoteVolume = Number(process.env.MIN_24H_QUOTE_VOLUME ?? 10_000_000);
 
   return (
     <main className="max-w-6xl mx-auto p-6 space-y-6">
@@ -37,7 +40,8 @@ export default async function SettingsPage() {
             <div className="kv"><span>Risk per trade</span><span>{cfg.riskPercent}%</span></div>
             <div className="kv"><span>Min confidence</span><span>{cfg.minConfidence}</span></div>
             <div className="kv"><span>Max concurrent</span><span>{cfg.maxConcurrent === 0 ? "Unlimited" : cfg.maxConcurrent}</span></div>
-            <div className="kv"><span>Auto discover</span><span>{process.env.AUTO_DISCOVER_SYMBOLS === "true" ? `ON (${process.env.MAX_SCREENER_SYMBOLS ?? "80"})` : "OFF"}</span></div>
+            <div className="kv"><span>Auto discover</span><span>{autoDiscover ? `ON (top ${maxScreenerSymbols})` : "OFF"}</span></div>
+            <div className="kv"><span>Min 24h volume</span><span>{min24hQuoteVolume.toLocaleString("en-US")} USDT</span></div>
             <div className="kv"><span>Last updated</span><span>{new Date(cfg.updatedAt).toLocaleString()}</span></div>
           </div>
         )}

@@ -49,8 +49,9 @@ export default async function DashboardPage() {
   try { if (cfg?.watchlist) watchlist = JSON.parse(cfg.watchlist); } catch { /* noop */ }
   const autoDiscover = process.env.AUTO_DISCOVER_SYMBOLS === "true" || process.env.AUTO_DISCOVER_SYMBOLS === "1";
   const universeLabel = autoDiscover
-    ? `${process.env.MAX_SCREENER_SYMBOLS ?? "80"} auto-discovered futures symbols`
+    ? `top ${process.env.MAX_SCREENER_SYMBOLS ?? "80"} liquid futures symbols`
     : `${watchlist.length} symbol${watchlist.length === 1 ? "" : "s"}`;
+  const min24hQuoteVolume = Number(process.env.MIN_24H_QUOTE_VOLUME ?? 10_000_000);
 
   // ----- hero stats -------------------------------------------------------
   const wallet = latestBalance?.totalWalletBalance ?? 0;
@@ -156,7 +157,7 @@ export default async function DashboardPage() {
         action={<Link href="/calendar" className="text-xs text-accent hover:underline">View PnL calendar →</Link>}
       >
         {autoDiscover
-          ? <p className="text-slate-500 text-sm">Scanning up to {process.env.MAX_SCREENER_SYMBOLS ?? "80"} Binance USDT perpetual symbols from exchangeInfo.</p>
+          ? <p className="text-slate-500 text-sm">Scanning top {process.env.MAX_SCREENER_SYMBOLS ?? "80"} Binance USDT perpetual symbols by 24h quote volume, minimum {min24hQuoteVolume.toLocaleString("en-US")} USDT.</p>
           : watchlist.length === 0
           ? <p className="text-slate-500 text-sm">No watchlist — using env default.</p>
           : <div className="flex flex-wrap gap-2">

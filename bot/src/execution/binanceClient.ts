@@ -34,6 +34,13 @@ export interface BinanceClientOptions {
   recvWindow?: number;
 }
 
+export interface Ticker24hr {
+  symbol: string;
+  quoteVolume: string;
+  volume?: string;
+  priceChangePercent?: string;
+}
+
 export interface PlaceOrderParams {
   symbol: string;
   side: "BUY" | "SELL";
@@ -231,6 +238,11 @@ export class BinanceFuturesClient {
     for (const s of r.symbols) map.set(s.symbol as string, s);
     this.filtersCache = map;
     return map;
+  }
+
+  /** 24h ticker stats for liquidity-based symbol discovery. */
+  async ticker24hr(): Promise<Ticker24hr[]> {
+    return this.publicGet<Ticker24hr[]>("/fapi/v1/ticker/24hr");
   }
 
   /** Historical K-lines used to warm the in-memory WebSocket buffers on boot. */

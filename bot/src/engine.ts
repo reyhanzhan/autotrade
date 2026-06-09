@@ -20,7 +20,7 @@ import { env } from "./shared/env.js";
 import { logger, recordEvent } from "./shared/logger.js";
 import { decryptSecret } from "./shared/crypto.js";
 import { BinanceStream } from "./websocket/binanceStream.js";
-import { BinanceFuturesClient } from "./execution/binanceClient.js";
+import { BinanceFuturesClient, type Ticker24hr } from "./execution/binanceClient.js";
 import { RiskManager } from "./execution/riskManager.js";
 import { Screener } from "./screener/screener.js";
 import { resolveExchangeUniverse, resolveWatchlist } from "./screener/symbols.js";
@@ -72,8 +72,19 @@ export class TradingEngine {
       return;
     }
 
+    const exchangeInfo = await client.exchangeInfo();
+    let tickers24h: Ticker24hr[] = [];
+    if (env.AUTO_DISCOVER_SYMBOLS) {
+      try {
+        tickers24h = await client.ticker24hr();
+      } catch (err) {
+        await recordEvent("engine", "warn", "24h ticker liquidity filter failed - falling back to exchangeInfo universe", {
+          err: (err as Error).message,
+        });
+      }
+    }
     const watchlist = env.AUTO_DISCOVER_SYMBOLS
-      ? resolveExchangeUniverse(await client.exchangeInfo())
+      ? resolveExchangeUniverse(exchangeInfo, tickers24h)
       : resolveWatchlist(cfg);
     if (watchlist.length === 0) {
       await recordEvent("engine", "error", "No symbols resolved for screener", {
@@ -131,6 +142,9 @@ export class TradingEngine {
     await recordEvent("engine", "info", "Engine started", {
       symbols: watchlist, interval, live: env.LIVE_TRADING, testnet: cfg.testnet,
       coinglass: env.hasCoinglass, minConfidence,
+      autoDiscover: env.AUTO_DISCOVER_SYMBOLS,
+      maxScreenerSymbols: env.MAX_SCREENER_SYMBOLS,
+      min24hQuoteVolume: env.MIN_24H_QUOTE_VOLUME,
     });
   }
 
