@@ -278,16 +278,25 @@ export class TradingEngine {
     }
 
     const confirmations: Array<{ interval: string; trend: StructureState["trend"]; requiredTrend: StructureState["trend"] }> = [];
-    for (const interval of intervals) {
+    for (const [idx, interval] of intervals.entries()) {
       const candles = await this.client.klines(signal.symbol, interval, Math.min(env.WARMUP_CANDLES, env.CANDLE_HISTORY));
       const structure = analyzeStructure(candles, DEFAULT_STRUCTURE_OPTS);
       confirmations.push({ interval, trend: structure.trend, requiredTrend });
-      if (structure.trend !== requiredTrend) {
+      const isPrimaryConfirmation = idx === 0;
+      if (isPrimaryConfirmation && structure.trend !== requiredTrend) {
         return {
           accepted: false,
           requiredTrend,
           confirmations,
           reason: `${interval} trend ${structure.trend} does not confirm ${signal.side}`,
+        };
+      }
+      if (!isPrimaryConfirmation && isOppositeTrend(structure.trend, requiredTrend)) {
+        return {
+          accepted: false,
+          requiredTrend,
+          confirmations,
+          reason: `${interval} trend ${structure.trend} opposes ${signal.side}`,
         };
       }
     }
@@ -392,4 +401,14 @@ function globalCooldownUntilForError(err: unknown): number | undefined {
 
 function trendForSide(side: Side): StructureState["trend"] {
   return side === "LONG" ? "BULLISH" : "BEARISH";
+}
+
+function isOppositeTrend(
+  trend: StructureState["trend"],
+  requiredTrend: StructureState["trend"]
+): boolean {
+  return (
+    (requiredTrend === "BULLISH" && trend === "BEARISH") ||
+    (requiredTrend === "BEARISH" && trend === "BULLISH")
+  );
 }

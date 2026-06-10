@@ -39,6 +39,7 @@ export function resolveExchangeUniverse(
       const status = String(s.status ?? "");
       return (
         symbol.endsWith("USDT") &&
+        isStandardUsdtSymbol(symbol) &&
         quoteAsset === "USDT" &&
         contractType === "PERPETUAL" &&
         status === "TRADING"
@@ -71,3 +72,7 @@ export function resolveExchangeUniverse(
 }
 
 function dedupe<T>(xs: T[]): T[] { return Array.from(new Set(xs)); }
+
+function isStandardUsdtSymbol(symbol: string): boolean {
+  return /^[A-Z0-9]+USDT$/.test(symbol);
+}
