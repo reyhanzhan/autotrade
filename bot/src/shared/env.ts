@@ -26,6 +26,7 @@ const schema = z.object({
   DEFAULT_RISK_PERCENT: z.coerce.number().min(0.1).max(50).default(1.0),
   CANDLE_HISTORY: z.coerce.number().int().min(50).max(1500).default(500),
   WARMUP_CANDLES: z.coerce.number().int().min(0).max(1500).default(100),
+  WARMUP_RETRY_INTERVAL_MS: z.coerce.number().int().min(30_000).max(3_600_000).default(90_000),
   ENABLE_MTF_CONFIRMATION: truthy.default("true"),
   MTF_CONFIRMATION_INTERVALS: z.string().default("1h,4h"),
   MTF_RANGING_RISK_MULTIPLIER: z.coerce.number().min(0.1).max(1).default(0.5),

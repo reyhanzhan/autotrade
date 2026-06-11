@@ -42,6 +42,9 @@ export class TradingEngine {
   private globalExecutionCooldownUntil = 0;
   private executionInFlight = false;
   private lastScanningHeartbeatAt = 0;
+  private pendingWarmupSymbols = new Set<string>();
+  private warmupRetryTimer?: NodeJS.Timeout;
+  private warmupRetryInFlight = false;
 
   async start(): Promise<void> {
     const cfg = await prisma.botConfig.findFirst({ where: { enabled: true } });
@@ -351,6 +354,7 @@ export class TradingEngine {
   }
 
   async stop(): Promise<void> {
+    if (this.warmupRetryTimer) clearInterval(this.warmupRetryTimer);
     this.balancePoller?.stop();
     this.reconciler?.stop();
     this.stream?.close();
@@ -368,7 +372,8 @@ export class TradingEngine {
     let loaded = 0;
     let failed = 0;
 
-    for (const symbol of symbols) {
+    for (let i = 0; i < symbols.length; i++) {
+      const symbol = symbols[i]!;
       try {
         const candles = await client.klines(symbol, interval, limit);
         this.stream.seedCandles(symbol, candles);
@@ -377,7 +382,11 @@ export class TradingEngine {
         failed++;
         const message = (err as Error).message;
         logger.warn({ symbol, err: message }, "Historical candle warmup failed");
-        if (/status=418|code=-1003|rate-limited/i.test(message)) break;
+        this.pendingWarmupSymbols.add(symbol);
+        if (/status=418|code=-1003|rate-limited|headroom/i.test(message)) {
+          for (const remaining of symbols.slice(i + 1)) this.pendingWarmupSymbols.add(remaining);
+          break;
+        }
       }
     }
 
@@ -388,6 +397,56 @@ export class TradingEngine {
       interval,
       limit,
     });
+
+    if (this.pendingWarmupSymbols.size > 0) {
+      this.startWarmupRetry(client, interval, limit);
+    }
+  }
+
+  private startWarmupRetry(
+    client: BinanceFuturesClient,
+    interval: string,
+    limit: number
+  ): void {
+    if (!this.stream || this.warmupRetryTimer) return;
+    void recordEvent("engine", "warn", "Historical candle warmup retry scheduled", {
+      pending: this.pendingWarmupSymbols.size,
+      retryIntervalMs: env.WARMUP_RETRY_INTERVAL_MS,
+    });
+
+    this.warmupRetryTimer = setInterval(() => {
+      void this.retryWarmupOneSymbol(client, interval, limit);
+    }, env.WARMUP_RETRY_INTERVAL_MS);
+  }
+
+  private async retryWarmupOneSymbol(
+    client: BinanceFuturesClient,
+    interval: string,
+    limit: number
+  ): Promise<void> {
+    if (!this.stream || this.warmupRetryInFlight) return;
+    const symbol = this.pendingWarmupSymbols.values().next().value as string | undefined;
+    if (!symbol) {
+      if (this.warmupRetryTimer) clearInterval(this.warmupRetryTimer);
+      this.warmupRetryTimer = undefined;
+      await recordEvent("websocket", "info", "Historical candle warmup retry complete", { pending: 0 });
+      return;
+    }
+
+    this.warmupRetryInFlight = true;
+    try {
+      const candles = await client.klines(symbol, interval, limit);
+      this.stream.seedCandles(symbol, candles);
+      this.pendingWarmupSymbols.delete(symbol);
+      await recordEvent("websocket", "info", "Historical candle retry loaded symbol", {
+        symbol,
+        pending: this.pendingWarmupSymbols.size,
+      });
+    } catch (err) {
+      logger.warn({ symbol, err: (err as Error).message }, "Historical candle retry failed");
+    } finally {
+      this.warmupRetryInFlight = false;
+    }
   }
 
   private cooldownSymbols(): Set<string> {
