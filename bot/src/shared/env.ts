@@ -28,6 +28,8 @@ const schema = z.object({
   WARMUP_CANDLES: z.coerce.number().int().min(0).max(1500).default(100),
   ENABLE_MTF_CONFIRMATION: truthy.default("true"),
   MTF_CONFIRMATION_INTERVALS: z.string().default("1h,4h"),
+  MTF_RANGING_RISK_MULTIPLIER: z.coerce.number().min(0.1).max(1).default(0.5),
+  SCANNING_HEARTBEAT_MS: z.coerce.number().int().min(60_000).max(3_600_000).default(900_000),
   MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.6),
   LIVE_TRADING: truthy.default("false"),
   ENABLE_RECONCILER: truthy.default("true"),

@@ -74,5 +74,7 @@ export function resolveExchangeUniverse(
 function dedupe<T>(xs: T[]): T[] { return Array.from(new Set(xs)); }
 
 function isStandardUsdtSymbol(symbol: string): boolean {
-  return /^[A-Z0-9]+USDT$/.test(symbol);
+  if (!/^[A-Z0-9]+USDT$/.test(symbol)) return false;
+  const base = symbol.slice(0, -"USDT".length);
+  return base.length >= 3;
 }

@@ -88,5 +88,7 @@ export interface TradeSignal {
       trend: StructureState["trend"];
       requiredTrend: StructureState["trend"];
     }>;
+    riskMultiplier?: number;
+    riskReason?: string;
   };
 }

@@ -102,7 +102,8 @@ export class RiskManager {
     if (!sym) throw new Error(`Symbol filters missing for ${symbol}`);
     const { qtyStep, minQty, maxQty, priceStep } = parseFilters(sym);
 
-    const riskUsdt = equity * (this.cfg.riskPercent / 100);
+    const riskMultiplier = clampRiskMultiplier(signal.context.riskMultiplier);
+    const riskUsdt = equity * (this.cfg.riskPercent / 100) * riskMultiplier;
     const stopDistance = Math.abs(signal.entryPrice - signal.stopLoss);
     if (stopDistance <= 0) {
       await recordEvent("execution", "error", "Invalid stop distance", { signal });
@@ -131,6 +132,8 @@ export class RiskManager {
         availableBalance,
         leverage: this.cfg.leverage,
         maxMarginUsage: MAX_MARGIN_USAGE,
+        riskMultiplier,
+        riskReason: signal.context.riskReason,
       });
     }
 
@@ -227,6 +230,8 @@ export class RiskManager {
     await recordEvent("execution", "info", "Bracket order placed", {
       signalId: signalRowId, symbol, side: signal.side, qty,
       entry: signal.entryPrice, sl: slPrice, tp: tpPrice,
+      riskMultiplier,
+      riskReason: signal.context.riskReason,
     });
     return true;
   }
@@ -300,4 +305,9 @@ function roundStep(n: number, step: number): number {
   if (step <= 0) return n;
   const decimals = (step.toString().split(".")[1] ?? "").length;
   return Number((Math.floor(n / step) * step).toFixed(decimals));
+}
+
+function clampRiskMultiplier(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 1;
+  return Math.max(0.1, Math.min(1, value));
 }

@@ -41,6 +41,7 @@ export class TradingEngine {
   private executionCooldownUntil = new Map<string, number>();
   private globalExecutionCooldownUntil = 0;
   private executionInFlight = false;
+  private lastScanningHeartbeatAt = 0;
 
   async start(): Promise<void> {
     const cfg = await prisma.botConfig.findFirst({ where: { enabled: true } });
@@ -157,7 +158,10 @@ export class TradingEngine {
     if (Date.now() < this.globalExecutionCooldownUntil || this.executionInFlight) return;
 
     const result = await this.screener.onClosedCandle(symbol, all, this.cooldownSymbols());
-    if (!result?.selected) return;
+    if (!result?.selected) {
+      await this.maybeRecordScanningHeartbeat(symbol, closed, result?.candidates ?? 0);
+      return;
+    }
 
     const { signal, confluence, finalConfidence } = result.selected;
     logger.info(
@@ -200,7 +204,7 @@ export class TradingEngine {
         );
         return;
       }
-      await this.attachMtfToSignal(sigRow?.id, mtf.confirmations);
+      await this.attachMtfToSignal(sigRow?.id, mtf.confirmations, mtf.riskMultiplier, mtf.riskReason);
 
       const placed = await this.risk.execute(
         {
@@ -209,6 +213,8 @@ export class TradingEngine {
           context: {
             ...signal.context,
             multiTimeframe: mtf.confirmations,
+            riskMultiplier: mtf.riskMultiplier,
+            riskReason: mtf.riskReason,
           },
         },
         sigRow?.id
@@ -239,7 +245,9 @@ export class TradingEngine {
 
   private async attachMtfToSignal(
     signalId: number | undefined,
-    confirmations: Array<{ interval: string; trend: StructureState["trend"]; requiredTrend: StructureState["trend"] }>
+    confirmations: Array<{ interval: string; trend: StructureState["trend"]; requiredTrend: StructureState["trend"] }>,
+    riskMultiplier?: number,
+    riskReason?: string
   ): Promise<void> {
     if (!signalId) return;
     const row = await prisma.signal.findUnique({ where: { id: signalId }, select: { payload: true } });
@@ -252,7 +260,14 @@ export class TradingEngine {
     }
     await prisma.signal.update({
       where: { id: signalId },
-      data: { payload: JSON.stringify({ ...payload, multiTimeframe: confirmations }) },
+      data: {
+        payload: JSON.stringify({
+          ...payload,
+          multiTimeframe: confirmations,
+          ...(riskMultiplier !== undefined && { riskMultiplier }),
+          ...(riskReason && { riskReason }),
+        }),
+      },
     });
   }
 
@@ -260,6 +275,8 @@ export class TradingEngine {
     accepted: boolean;
     requiredTrend: StructureState["trend"];
     confirmations: Array<{ interval: string; trend: StructureState["trend"]; requiredTrend: StructureState["trend"] }>;
+    riskMultiplier?: number;
+    riskReason?: string;
     reason?: string;
   }> {
     const intervals = env.ENABLE_MTF_CONFIRMATION ? env.mtfConfirmationIntervals : [];
@@ -278,12 +295,19 @@ export class TradingEngine {
     }
 
     const confirmations: Array<{ interval: string; trend: StructureState["trend"]; requiredTrend: StructureState["trend"] }> = [];
+    let riskMultiplier: number | undefined;
+    let riskReason: string | undefined;
     for (const [idx, interval] of intervals.entries()) {
       const candles = await this.client.klines(signal.symbol, interval, Math.min(env.WARMUP_CANDLES, env.CANDLE_HISTORY));
       const structure = analyzeStructure(candles, DEFAULT_STRUCTURE_OPTS);
       confirmations.push({ interval, trend: structure.trend, requiredTrend });
       const isPrimaryConfirmation = idx === 0;
       if (isPrimaryConfirmation && structure.trend !== requiredTrend) {
+        if (structure.trend === "RANGING" && hasStrongFifteenMinuteSetup(signal)) {
+          riskMultiplier = env.MTF_RANGING_RISK_MULTIPLIER;
+          riskReason = `${interval} trend RANGING accepted with strong 15m BOS + Fib + RR`;
+          continue;
+        }
         return {
           accepted: false,
           requiredTrend,
@@ -305,8 +329,25 @@ export class TradingEngine {
       symbol: signal.symbol,
       side: signal.side,
       confirmations,
+      riskMultiplier,
+      riskReason,
     });
-    return { accepted: true, requiredTrend, confirmations };
+    return { accepted: true, requiredTrend, confirmations, riskMultiplier, riskReason };
+  }
+
+  private async maybeRecordScanningHeartbeat(
+    symbol: string,
+    closed: Candle,
+    candidates: number
+  ): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastScanningHeartbeatAt < env.SCANNING_HEARTBEAT_MS) return;
+    this.lastScanningHeartbeatAt = now;
+    await recordEvent("screener", "info", "Bot scanning, no candidate", {
+      lastEvaluatedSymbol: symbol,
+      candleCloseTime: new Date(closed.closeTime).toISOString(),
+      candidates,
+    });
   }
 
   async stop(): Promise<void> {
@@ -397,6 +438,15 @@ function cooldownMsForError(err: unknown, fallbackMs: number): number {
 function globalCooldownUntilForError(err: unknown): number | undefined {
   const ms = cooldownMsForError(err, 0);
   return ms > 0 ? Date.now() + ms : undefined;
+}
+
+function hasStrongFifteenMinuteSetup(signal: TradeSignal): boolean {
+  const fib = signal.context.fibonacci;
+  return (
+    signal.context.structure.bos === signal.side &&
+    fib !== undefined &&
+    fib.riskReward >= 2
+  );
 }
 
 function trendForSide(side: Side): StructureState["trend"] {
