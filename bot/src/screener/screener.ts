@@ -185,6 +185,7 @@ export class Screener {
             orderBlock: c.context.orderBlock,
             fvg: c.context.fvg,
             fibonacci: c.context.fibonacci,
+            trendPullback: c.context.trendPullback,
             multiTimeframe: c.context.multiTimeframe,
             confluence: s.confluence,
           }),

@@ -83,6 +83,15 @@ export interface TradeSignal {
       structureTarget: number;
       riskReward: number;
     };
+    trendPullback?: {
+      ema20: number;
+      ema50: number;
+      ema200: number;
+      atr: number;
+      pullbackLow: number;
+      pullbackHigh: number;
+      riskReward: number;
+    };
     multiTimeframe?: Array<{
       interval: string;
       trend: StructureState["trend"];
