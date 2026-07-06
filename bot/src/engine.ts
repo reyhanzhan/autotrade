@@ -45,6 +45,8 @@ export class TradingEngine {
   private pendingWarmupSymbols = new Set<string>();
   private warmupRetryTimer?: NodeJS.Timeout;
   private warmupRetryInFlight = false;
+  private restPollingTimer?: NodeJS.Timeout;
+  private restPollingInFlight = false;
 
   async start(): Promise<void> {
     const cfg = await prisma.botConfig.findFirst({ where: { enabled: true } });
@@ -143,6 +145,7 @@ export class TradingEngine {
     });
 
     this.stream.connect();
+    this.startRestCandlePolling(client, watchlist, interval);
     await recordEvent("engine", "info", "Engine started", {
       symbols: watchlist, interval, live: env.LIVE_TRADING, testnet: cfg.testnet,
       coinglass: env.hasCoinglass, minConfidence,
@@ -355,10 +358,58 @@ export class TradingEngine {
 
   async stop(): Promise<void> {
     if (this.warmupRetryTimer) clearInterval(this.warmupRetryTimer);
+    if (this.restPollingTimer) clearInterval(this.restPollingTimer);
     this.balancePoller?.stop();
     this.reconciler?.stop();
     this.stream?.close();
     await prisma.$disconnect();
+  }
+
+  private startRestCandlePolling(
+    client: BinanceFuturesClient,
+    symbols: string[],
+    interval: string
+  ): void {
+    if (this.restPollingTimer) return;
+    const limit = Math.min(env.WARMUP_CANDLES, env.CANDLE_HISTORY);
+    const pollIntervalMs = 60_000;
+
+    const poll = async (): Promise<void> => {
+      if (this.restPollingInFlight) return;
+      this.restPollingInFlight = true;
+      try {
+        let evaluated = 0;
+        for (const symbol of symbols) {
+          const candles = await client.klines(symbol, interval, limit);
+          if (candles.length === 0) continue;
+
+          this.stream?.seedCandles(symbol, candles);
+          const closed = candles.filter((c) => c.isClosed).at(-1);
+          if (!closed) continue;
+
+          await this.onClosedCandle(symbol, closed, candles);
+          evaluated++;
+        }
+        if (evaluated > 0) {
+          logger.debug({ evaluated, symbols: symbols.length, interval }, "REST candle polling evaluated symbols");
+        }
+      } catch (err) {
+        await recordEvent("engine", "warn", "REST candle polling failed", {
+          err: (err as Error).message,
+        });
+      } finally {
+        this.restPollingInFlight = false;
+      }
+    };
+
+    this.restPollingTimer = setInterval(() => { void poll(); }, pollIntervalMs);
+    setTimeout(() => { void poll(); }, 10_000);
+    void recordEvent("engine", "info", "REST candle polling started", {
+      symbols,
+      interval,
+      limit,
+      pollIntervalMs,
+    });
   }
 
   private async warmupStreamBuffers(
