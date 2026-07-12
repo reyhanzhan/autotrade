@@ -29,7 +29,7 @@ import { PositionReconciler } from "./reconciler/positionReconciler.js";
 import { BalancePoller } from "./reconciler/balancePoller.js";
 import type { Candle, Side, StructureState, TradeSignal } from "./shared/types.js";
 import { analyzeStructure, DEFAULT_STRUCTURE_OPTS } from "./strategy/structure.js";
-import { computeRSI } from "./strategy/indicators.js";
+import { computeADX, computeATR, computeRSI } from "./strategy/indicators.js";
 
 export class TradingEngine {
   private stream?: BinanceStream;
@@ -51,6 +51,9 @@ export class TradingEngine {
   private batchTimer?: NodeJS.Timeout;
   private btcRegimeTimer?: NodeJS.Timeout;
   private btcRegimeSafe = true;
+  private maxConcurrent = 1;
+  private dynamicBlacklist = new Map<string, number>();
+  private dynamicBlacklistTimer?: NodeJS.Timeout;
 
   async start(): Promise<void> {
     const cfg = await prisma.botConfig.findFirst({ where: { enabled: true } });
@@ -104,6 +107,7 @@ export class TradingEngine {
     }
     const interval = cfg.interval;
     const minConfidence = cfg.minConfidence ?? env.MIN_CONFIDENCE;
+    this.maxConcurrent = cfg.maxConcurrent;
 
     this.risk = new RiskManager(client, {
       leverage: cfg.leverage,
@@ -169,8 +173,7 @@ export class TradingEngine {
     if (!this.screener || !this.risk) return;
     if (Date.now() < this.globalExecutionCooldownUntil || this.executionInFlight) return;
 
-    // Regimer filter check
-    if (!this.btcRegimeSafe && symbol !== "BTCUSDT") return;
+    if (env.BTC_REGIME_ENABLED && !this.btcRegimeSafe && symbol !== "BTCUSDT") return;
 
     await this.screener.onClosedCandle(symbol, all, this.cooldownSymbols());
 
@@ -185,48 +188,64 @@ export class TradingEngine {
   private async processBatchScreening(closed: Candle): Promise<void> {
     if (!this.screener || !this.risk) return;
     if (Date.now() < this.globalExecutionCooldownUntil || this.executionInFlight) return;
-    
+    if (env.BTC_REGIME_ENABLED && !this.btcRegimeSafe) return;
+
     const result = await this.screener.runScreeningPass(this.cooldownSymbols());
-    if (!result?.selected) {
+    const selected = result?.selectedMany ?? (result?.selected ? [result.selected] : []);
+    if (selected.length === 0) {
       await this.maybeRecordScanningHeartbeat("BATCH", closed, result?.candidates ?? 0);
       return;
     }
 
-    const { signal, confluence, finalConfidence } = result.selected;
+    const openCount = await prisma.position.count();
+    const slots = this.maxConcurrent > 0 ? Math.max(this.maxConcurrent - openCount, 0) : selected.length;
+    for (const picked of selected.slice(0, slots)) {
+      await this.executeScreenedSignal(result!.runId, picked.signal, picked.confluence, picked.finalConfidence);
+    }
+  }
+
+  private async executeScreenedSignal(
+    runId: number,
+    signal: TradeSignal,
+    confluence: { multiplier: number },
+    finalConfidence: number
+  ): Promise<void> {
+    if (!this.risk) return;
+    const risk = this.risk;
+    const finalSignal: TradeSignal = { ...signal, confidence: finalConfidence };
     logger.info(
       {
-        symbol: signal.symbol, kind: signal.kind, side: signal.side,
-        entry: signal.entryPrice, sl: signal.stopLoss, tp: signal.takeProfit,
+        symbol: finalSignal.symbol, kind: finalSignal.kind, side: finalSignal.side,
+        entry: finalSignal.entryPrice, sl: finalSignal.stopLoss, tp: finalSignal.takeProfit,
         baseConf: signal.confidence, conf: finalConfidence,
         coinglass: confluence.multiplier,
       },
-      "Winning signal — executing"
+      "Winning signal - executing"
     );
 
-    // Find the just-persisted Signal row to link orders/trades to it.
     const sigRow = await prisma.signal.findFirst({
       where: {
-        symbol: signal.symbol,
-        screeningRunId: result.runId,
+        symbol: finalSignal.symbol,
+        screeningRunId: runId,
       },
       orderBy: { id: "desc" },
     });
 
     this.executionInFlight = true;
     try {
-      const mtf = await this.confirmMultiTimeframe(signal);
+      const mtf = await this.confirmMultiTimeframe(finalSignal);
       if (!mtf.accepted) {
         await this.attachMtfToSignal(sigRow?.id, mtf.confirmations);
         await recordEvent("strategy", "warn", "MTF confirmation rejected signal", {
           signalId: sigRow?.id,
-          symbol: signal.symbol,
-          side: signal.side,
+          symbol: finalSignal.symbol,
+          side: finalSignal.side,
           requiredTrend: mtf.requiredTrend,
           confirmations: mtf.confirmations,
           reason: mtf.reason,
         });
         this.setExecutionCooldown(
-          signal.symbol,
+          finalSignal.symbol,
           env.FAILED_TRADE_COOLDOWN_MS,
           "Skipped execution cooldown started",
           { reason: mtf.reason }
@@ -235,12 +254,11 @@ export class TradingEngine {
       }
       await this.attachMtfToSignal(sigRow?.id, mtf.confirmations, mtf.riskMultiplier, mtf.riskReason);
 
-      const placed = await this.risk.execute(
+      const placed = await risk.execute(
         {
-          ...signal,
-          confidence: finalConfidence,
+          ...finalSignal,
           context: {
-            ...signal.context,
+            ...finalSignal.context,
             multiTimeframe: mtf.confirmations,
             riskMultiplier: mtf.riskMultiplier,
             riskReason: mtf.riskReason,
@@ -249,7 +267,7 @@ export class TradingEngine {
         sigRow?.id
       );
       this.setExecutionCooldown(
-        signal.symbol,
+        finalSignal.symbol,
         placed ? env.TRADE_SYMBOL_COOLDOWN_MS : env.FAILED_TRADE_COOLDOWN_MS,
         placed ? "Trade execution cooldown started" : "Skipped execution cooldown started"
       );
@@ -263,7 +281,7 @@ export class TradingEngine {
           err: (err as Error).message,
         });
       }
-      this.setExecutionCooldown(signal.symbol, cooldownMs, "Failed execution cooldown started", {
+      this.setExecutionCooldown(finalSignal.symbol, cooldownMs, "Failed execution cooldown started", {
         err: (err as Error).message,
       });
       throw err;
@@ -271,7 +289,6 @@ export class TradingEngine {
       this.executionInFlight = false;
     }
   }
-
   private async attachMtfToSignal(
     signalId: number | undefined,
     confirmations: Array<{ interval: string; trend: StructureState["trend"]; requiredTrend: StructureState["trend"] }>,
@@ -354,8 +371,8 @@ export class TradingEngine {
            }
         }
         if (signal.side === "SHORT" && structure.trend === "RANGING") {
-           if (signal.confidence < 0.75) {
-              return { accepted: false, requiredTrend, confirmations, reason: "4H Ranging requires 0.75+ confidence for SHORT" };
+           if (signal.confidence < env.HIGH_RISK_SHORT_MIN_CONFIDENCE) {
+              return { accepted: false, requiredTrend, confirmations, reason: "4H Ranging requires high-risk SHORT confidence threshold" };
            }
            riskMultiplier = env.MTF_RANGING_RISK_MULTIPLIER;
            riskReason = "High Risk Short (4H Ranging)";
@@ -418,36 +435,52 @@ export class TradingEngine {
   }
 
   private startBtcRegimePolling(client: BinanceFuturesClient): void {
-    if (this.btcRegimeTimer) return;
+    if (!env.BTC_REGIME_ENABLED || this.btcRegimeTimer) return;
     const poll = async () => {
       try {
-        const klines4h = await client.klines("BTCUSDT", "4h", 20);
-        const klines1h = await client.klines("BTCUSDT", "1h", 20);
-        const struct4h = analyzeStructure(klines4h, DEFAULT_STRUCTURE_OPTS);
-        const struct1h = analyzeStructure(klines1h, DEFAULT_STRUCTURE_OPTS);
-        
-        const isCrash = (struct4h.trend === "BEARISH" || struct1h.trend === "BEARISH");
-        const isRanging = struct4h.trend === "RANGING" || struct1h.trend === "RANGING";
-        
+        const klines4h = await client.klines("BTCUSDT", "4h", 120);
+        const klines1h = await client.klines("BTCUSDT", "1h", 120);
+        const last1h = klines1h.at(-1)?.close;
+        const last4h = klines4h.at(-1)?.close;
+        const prev1h = klines1h.at(-2)?.close;
+        const prev4h = klines4h.at(-2)?.close;
+        const adx1h = computeADX(klines1h, 14);
+        const adx4h = computeADX(klines4h, 14);
+        const atr1h = computeATR(klines1h, 14);
+        const atr4h = computeATR(klines4h, 14);
+        const drop1h = last1h && prev1h ? ((last1h - prev1h) / prev1h) * 100 : 0;
+        const drop4h = last4h && prev4h ? ((last4h - prev4h) / prev4h) * 100 : 0;
+        const atrPct1h = last1h && atr1h ? (atr1h / last1h) * 100 : undefined;
+        const atrPct4h = last4h && atr4h ? (atr4h / last4h) * 100 : undefined;
+
+        const crash = drop1h <= -env.BTC_CRASH_1H_PCT || drop4h <= -env.BTC_CRASH_4H_PCT;
+        const tightRanging = (
+          adx1h !== undefined && atrPct1h !== undefined && adx1h < env.BTC_RANGING_ADX && atrPct1h < env.BTC_RANGING_ATR_PCT
+        ) || (
+          adx4h !== undefined && atrPct4h !== undefined && adx4h < env.BTC_RANGING_ADX && atrPct4h < env.BTC_RANGING_ATR_PCT
+        );
+
         const oldState = this.btcRegimeSafe;
-        this.btcRegimeSafe = !(isCrash || isRanging);
-        
+        this.btcRegimeSafe = !(crash || tightRanging);
         if (oldState !== this.btcRegimeSafe) {
-           await recordEvent("engine", "info", `BTC Regime changed: ${this.btcRegimeSafe ? 'SAFE' : 'UNSAFE'}`, {
-             struct4h: struct4h.trend,
-             struct1h: struct1h.trend,
-             isCrash,
-             isRanging
-           });
+          await recordEvent("engine", this.btcRegimeSafe ? "info" : "warn", `BTC regime ${this.btcRegimeSafe ? "SAFE" : "UNSAFE"}`, {
+            drop1h,
+            drop4h,
+            adx1h,
+            adx4h,
+            atrPct1h,
+            atrPct4h,
+            crash,
+            tightRanging,
+          });
         }
       } catch (err) {
-        logger.warn({ err: (err as Error).message }, "BTC Regime poll failed");
+        logger.warn({ err: (err as Error).message }, "BTC regime poll failed");
       }
     };
-    this.btcRegimeTimer = setInterval(() => void poll(), 300_000);
+    this.btcRegimeTimer = setInterval(() => void poll(), env.BTC_REGIME_CACHE_MS);
     void poll();
   }
-
   private startRestCandlePolling(
     client: BinanceFuturesClient,
     symbols: string[],
@@ -591,16 +624,13 @@ export class TradingEngine {
       else this.executionCooldownUntil.delete(symbol);
     }
     
-    // Also include dynamic blacklist
-    for (const symbol of this.dynamicBlacklist) {
-      symbols.add(symbol);
+    for (const [symbol, until] of this.dynamicBlacklist) {
+      if (until > now) symbols.add(symbol);
+      else this.dynamicBlacklist.delete(symbol);
     }
     
     return symbols;
   }
-
-  private dynamicBlacklist = new Set<string>();
-  private dynamicBlacklistTimer?: NodeJS.Timeout;
 
   private startDynamicBlacklistPolling(): void {
     if (this.dynamicBlacklistTimer) return;
@@ -608,7 +638,16 @@ export class TradingEngine {
       try {
         const { getDynamicBlacklist } = await import("./screener/symbols.js");
         const list = await getDynamicBlacklist();
-        this.dynamicBlacklist = list;
+        const until = Date.now() + env.AUTO_BLACKLIST_DAYS * 24 * 60 * 60 * 1000;
+        for (const symbol of list) {
+          if (!this.dynamicBlacklist.has(symbol)) {
+            this.dynamicBlacklist.set(symbol, until);
+            await recordEvent("risk", "warn", "Symbol auto-blacklisted", {
+              symbol,
+              until: new Date(until).toISOString(),
+            });
+          }
+        }
       } catch (err) {
         // tolerate
       }

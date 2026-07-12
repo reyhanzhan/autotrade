@@ -87,6 +87,7 @@ export interface TradeSignal {
       ema20: number;
       ema50: number;
       ema200: number;
+      adx?: number;
       atr: number;
       pullbackLow: number;
       pullbackHigh: number;
@@ -99,5 +100,7 @@ export interface TradeSignal {
     }>;
     riskMultiplier?: number;
     riskReason?: string;
+    dynamicThreshold?: number;
+    dynamicThresholdReason?: string;
   };
 }

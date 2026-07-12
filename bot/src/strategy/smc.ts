@@ -99,14 +99,7 @@ export class SMCEngine {
           hasFib: true,
         });
 
-        let dynamicThreshold = this.cfg.minConfidence;
-        const adx = computeADX(preTapCandles, 14);
-        if (adx !== undefined) {
-          if (adx > 25) dynamicThreshold = Math.max(0, this.cfg.minConfidence - 0.03); // e.g. 0.65
-          else if (adx < 20) dynamicThreshold = Math.min(1, this.cfg.minConfidence + 0.07); // e.g. 0.75
-        }
-
-        if (confidence >= dynamicThreshold) {
+        if (confidence >= this.cfg.minConfidence) {
           const kind = `${zone.source}_TAP_${side}`;
 
           return {
@@ -123,7 +116,6 @@ export class SMCEngine {
               orderBlock: zone.source === "OB" ? zone.raw : undefined,
               fvg: zone.source === "FVG" ? zone.raw : undefined,
               fibonacci: fibPlan.fibonacci,
-              dynamicThreshold,
             },
           };
         }
@@ -141,19 +133,7 @@ export class SMCEngine {
       slAtrMult: this.cfg.trendPullbackSlAtrMult,
     });
     
-    if (trendPullback) {
-      let dynamicThreshold = this.cfg.minConfidence;
-      const adx = computeADX(candles.filter((c) => c.openTime < lastClosed.openTime), 14);
-      if (adx !== undefined) {
-        if (adx > 25) dynamicThreshold = Math.max(0, this.cfg.minConfidence - 0.03);
-        else if (adx < 20) dynamicThreshold = Math.min(1, this.cfg.minConfidence + 0.07);
-      }
-      
-      if (trendPullback.confidence >= dynamicThreshold) {
-        trendPullback.context.dynamicThreshold = dynamicThreshold;
-        return trendPullback;
-      }
-    }
+    if (trendPullback && trendPullback.confidence >= this.cfg.minConfidence) return trendPullback;
   }
 }
 

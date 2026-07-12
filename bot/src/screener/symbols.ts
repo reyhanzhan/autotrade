@@ -7,6 +7,7 @@
 // ============================================================================
 
 import { env } from "../shared/env.js";
+import { prisma } from "../shared/db.js";
 import type { BotConfig } from "@prisma/client";
 import type { Ticker24hr } from "../execution/binanceClient.js";
 
@@ -85,18 +86,18 @@ function isStandardUsdtSymbol(symbol: string): boolean {
   return base.length >= 3;
 }
 
-import { prisma } from "../shared/db.js";
-
 /** 
- * Returns a set of symbols that should be dynamically blacklisted for 14 days
- * based on poor historical performance (Win Rate < 30% or >= 3 consecutive losses).
+ * Finds symbols that deserve a temporary runtime blacklist based on recent
+ * realized trades. The engine owns the 14-day expiry window.
  */
 export async function getDynamicBlacklist(): Promise<Set<string>> {
   const dynamicBlacklist = new Set<string>();
   try {
+    if (!env.AUTO_BLACKLIST_ENABLED) return dynamicBlacklist;
+    const cutoff = new Date(Date.now() - env.AUTO_BLACKLIST_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
     const trades = await prisma.trade.findMany({
       where: {
-        closedAt: { not: null },
+        closedAt: { gte: cutoff },
       },
       orderBy: { closedAt: 'desc' }
     });
@@ -109,32 +110,26 @@ export async function getDynamicBlacklist(): Promise<Set<string>> {
       tradesBySymbol.set(t.symbol, arr);
     }
     
-    const cutoff14Days = Date.now() - 14 * 24 * 60 * 60 * 1000;
-    
     for (const [symbol, symTrades] of tradesBySymbol.entries()) {
       if (symTrades.length === 0) continue;
-      
-      const lastTradeTime = symTrades[0]?.closedAt?.getTime() ?? 0;
-      if (lastTradeTime < cutoff14Days) continue; // 14 days have passed
-      
+
       let consecutiveLosses = 0;
       for (const t of symTrades) {
         if (t.pnl && t.pnl < 0) consecutiveLosses++;
         else break;
       }
-      
-      const minTradesForWr = 5;
+
       let isBlacklisted = false;
-      
-      if (consecutiveLosses >= 3) {
+
+      if (consecutiveLosses >= env.AUTO_BLACKLIST_LOSS_STREAK) {
         isBlacklisted = true;
-      } else if (symTrades.length >= minTradesForWr) {
+      } else if (symTrades.length >= env.AUTO_BLACKLIST_MIN_TRADES) {
         let wins = 0;
         for (const t of symTrades) {
           if (t.pnl && t.pnl > 0) wins++;
         }
         const wr = wins / symTrades.length;
-        if (wr < 0.3) isBlacklisted = true;
+        if (wr < env.AUTO_BLACKLIST_MAX_WIN_RATE) isBlacklisted = true;
       }
       
       if (isBlacklisted) dynamicBlacklist.add(symbol);

@@ -22,6 +22,7 @@
 // ============================================================================
 
 import { prisma } from "../shared/db.js";
+import { env } from "../shared/env.js";
 import { logger, recordEvent } from "../shared/logger.js";
 import { SMCEngine, DEFAULT_SMC_CONFIG } from "../strategy/smc.js";
 import { CoinglassClient } from "../external/coinglass.js";
@@ -49,6 +50,11 @@ export interface ScreeningResult {
     confluence: ConfluenceBreakdown;
     finalConfidence: number;
   };
+  selectedMany?: Array<{
+    signal: TradeSignal;
+    confluence: ConfluenceBreakdown;
+    finalConfidence: number;
+  }>;
   candidates: number;
 }
 
@@ -139,6 +145,9 @@ export class Screener {
           logger.warn({ sym, err: (e as Error).message }, "Coinglass scoring failed; using neutral");
         }
         const finalConfidence = clamp01(c.signal.confidence * confluence.multiplier);
+        const { threshold, reason } = thresholdFor(c.signal, this.opts.minConfidence);
+        c.signal.context.dynamicThreshold = threshold;
+        c.signal.context.dynamicThresholdReason = reason;
         return { sym, candidate: c, confluence, finalConfidence };
       })
     );
@@ -146,19 +155,20 @@ export class Screener {
     // Pick the best.
     scored.sort((a, b) => b.finalConfidence - a.finalConfidence);
     const winner = scored[0];
+    const eligible = scored.filter((s) => s.finalConfidence >= thresholdFor(s.candidate.signal, this.opts.minConfidence).threshold);
 
     const run = await prisma.screeningRun.create({
       data: {
         interval: this.opts.interval,
         symbolsScanned: symbolsJson,
         candidateCount: scored.length,
-        selectedSymbol: winner && winner.finalConfidence >= (winner.candidate.signal.context.dynamicThreshold as number ?? this.opts.minConfidence) ? winner.sym : null,
-        selectedSide: winner && winner.finalConfidence >= (winner.candidate.signal.context.dynamicThreshold as number ?? this.opts.minConfidence) ? winner.candidate.signal.side : null,
+        selectedSymbol: eligible[0]?.sym ?? null,
+        selectedSide: eligible[0]?.candidate.signal.side ?? null,
         bestConfidence: winner?.finalConfidence ?? null,
         reason: winner
-          ? winner.finalConfidence >= (winner.candidate.signal.context.dynamicThreshold as number ?? this.opts.minConfidence)
-            ? `Selected ${winner.sym} ${winner.candidate.signal.side} @ ${winner.finalConfidence.toFixed(2)}`
-            : `Best candidate ${winner.sym} below threshold (${winner.finalConfidence.toFixed(2)} < ${(winner.candidate.signal.context.dynamicThreshold as number ?? this.opts.minConfidence)})`
+          ? eligible.length > 0
+            ? `Selected ${eligible[0]!.sym} ${eligible[0]!.candidate.signal.side} @ ${eligible[0]!.finalConfidence.toFixed(2)}`
+            : `Best candidate ${winner.sym} below threshold (${winner.finalConfidence.toFixed(2)} < ${thresholdFor(winner.candidate.signal, this.opts.minConfidence).threshold})`
           : "No candidates",
       },
     });
@@ -184,6 +194,8 @@ export class Screener {
             fibonacci: c.context.fibonacci,
             trendPullback: c.context.trendPullback,
             multiTimeframe: c.context.multiTimeframe,
+            dynamicThreshold: c.context.dynamicThreshold,
+            dynamicThresholdReason: c.context.dynamicThresholdReason,
             confluence: s.confluence,
           }),
           screeningRunId: run.id,
@@ -194,26 +206,29 @@ export class Screener {
     await recordEvent("screener", "info", "Screening pass complete", {
       runId: run.id,
       candidates: scored.length,
-      selected: winner && winner.finalConfidence >= this.opts.minConfidence ? winner.sym : null,
+      selected: eligible[0]?.sym ?? null,
       bestConfidence: winner?.finalConfidence ?? null,
     });
 
-    const dynThresh = winner?.candidate.signal.context.dynamicThreshold as number ?? this.opts.minConfidence;
-    if (!winner || winner.finalConfidence < dynThresh) {
+    if (eligible.length === 0) {
       return { runId: run.id, candidates: scored.length };
     }
 
-    // Remove the winner from the cache so we don't double-execute next pass.
-    this.candidates.delete(winner.sym);
+    for (const s of eligible) this.candidates.delete(s.sym);
 
     return {
       runId: run.id,
       candidates: scored.length,
       selected: {
-        signal: winner.candidate.signal,
-        confluence: winner.confluence,
-        finalConfidence: winner.finalConfidence,
+        signal: eligible[0]!.candidate.signal,
+        confluence: eligible[0]!.confluence,
+        finalConfidence: eligible[0]!.finalConfidence,
       },
+      selectedMany: eligible.map((s) => ({
+        signal: s.candidate.signal,
+        confluence: s.confluence,
+        finalConfidence: s.finalConfidence,
+      })),
     };
     } finally {
       this.screeningPassInFlight = false;
@@ -222,3 +237,12 @@ export class Screener {
 }
 
 function clamp01(n: number): number { return Math.max(0, Math.min(1, n)); }
+
+function thresholdFor(signal: TradeSignal, fallback: number): { threshold: number; reason: string } {
+  if (!env.DYNAMIC_CONFIDENCE_ENABLED) return { threshold: fallback, reason: "fixed" };
+  const adx = signal.context.trendPullback?.adx;
+  if (adx === undefined || !Number.isFinite(adx)) return { threshold: fallback, reason: "no_adx" };
+  if (adx > env.STRONG_TREND_ADX) return { threshold: Math.min(fallback, env.STRONG_TREND_MIN_CONFIDENCE), reason: `adx>${env.STRONG_TREND_ADX}` };
+  if (adx < env.RANGING_ADX) return { threshold: Math.max(fallback, env.RANGING_MIN_CONFIDENCE), reason: `adx<${env.RANGING_ADX}` };
+  return { threshold: fallback, reason: "normal_adx" };
+}

@@ -78,8 +78,12 @@ export class RiskManager {
     }
 
     const directionalOpen = await prisma.position.count({ where: { side: signal.side } });
-    if (directionalOpen >= 2) {
-      await recordEvent("execution", "warn", "Directional concurrency cap (2) reached; skipping", { side: signal.side, directionalOpen });
+    if (directionalOpen >= env.MAX_SAME_SIDE_POSITIONS) {
+      await recordEvent("execution", "warn", "Same-side exposure cap reached; skipping", {
+        side: signal.side,
+        directionalOpen,
+        maxSameSide: env.MAX_SAME_SIDE_POSITIONS,
+      });
       return false;
     }
 
@@ -94,14 +98,26 @@ export class RiskManager {
       const ask = parseFloat(spreadCheck.askPrice);
       const bid = parseFloat(spreadCheck.bidPrice);
       if (ask > 0 && bid > 0) {
-        const spread = (ask - bid) / bid;
-        if (spread > 0.0005) { // 0.05%
-          await recordEvent("execution", "warn", "Spread too wide; skipping execution", { symbol, spread: (spread * 100).toFixed(4) + "%" });
+        const mid = (ask + bid) / 2;
+        const spreadPct = ((ask - bid) / mid) * 100;
+        if (spreadPct > env.MAX_ENTRY_SPREAD_PCT) {
+          await recordEvent("execution", "warn", "Spread too wide; skipping execution", {
+            symbol,
+            spreadPct,
+            maxSpreadPct: env.MAX_ENTRY_SPREAD_PCT,
+          });
           return false;
         }
+      } else {
+        await recordEvent("execution", "warn", "Invalid book ticker; skipping execution", { symbol, ask, bid });
+        return false;
       }
     } catch (err) {
-      logger.warn({ symbol, err: (err as Error).message }, "Spread check failed, proceeding anyway");
+      await recordEvent("execution", "warn", "Spread check failed; skipping execution", {
+        symbol,
+        err: (err as Error).message,
+      });
+      return false;
     }
 
     await this.ensureSettingsFor(symbol);
