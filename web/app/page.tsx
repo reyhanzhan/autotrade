@@ -73,7 +73,7 @@ export default async function DashboardPage() {
   const sparkPoints = balanceHistory.slice().reverse().map((b) => b.totalWalletBalance);
 
   return (
-    <main className="max-w-6xl mx-auto p-6 space-y-6">
+    <main className="max-w-6xl mx-auto p-4 md:p-6 space-y-4 md:space-y-6">
       <AutoRefresh />
       {/* Header */}
       <header>
@@ -198,33 +198,35 @@ export default async function DashboardPage() {
         </Card>
 
         <Card title="Recent Signals (all symbols)" className="md:col-span-2">
-          <table className="t">
-            <thead>
-              <tr>
-                <th>Time</th><th>Symbol</th><th>Pattern</th>
-                <th className="text-right">SMC</th>
-                <th className="text-right">×CG</th>
-                <th className="text-right">Final</th>
-                <th className="text-right">Acted</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recentSignals.map((s) => (
-                <tr key={s.id}>
-                  <td className="text-slate-400 text-xs">{formatWibTime(s.createdAt)}</td>
-                  <td className="font-mono">{s.symbol}</td>
-                  <td><span className={s.side === "LONG" ? "pill-good" : "pill-bad"}>{s.kind}</span></td>
-                  <td className="text-right font-mono">{(s.baseConfidence * 100).toFixed(0)}%</td>
-                  <td className="text-right font-mono text-slate-400">{s.coinglassScore?.toFixed(2) ?? "—"}</td>
-                  <td className="text-right font-mono font-bold">{(s.confidence * 100).toFixed(0)}%</td>
-                  <td className="text-right">{s.consumed ? <span className="text-success">●</span> : <span className="text-slate-600">○</span>}</td>
+          <div className="overflow-x-auto hide-scrollbar">
+            <table className="t min-w-[600px]">
+              <thead>
+                <tr>
+                  <th>Time</th><th>Symbol</th><th>Pattern</th>
+                  <th className="text-right">SMC</th>
+                  <th className="text-right">×CG</th>
+                  <th className="text-right">Final</th>
+                  <th className="text-right">Acted</th>
                 </tr>
-              ))}
-              {recentSignals.length === 0 && (
-                <tr><td colSpan={7} className="text-slate-500 py-3">No signals yet.</td></tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {recentSignals.map((s) => (
+                  <tr key={s.id}>
+                    <td className="text-slate-400 text-xs">{formatWibTime(s.createdAt)}</td>
+                    <td className="font-mono">{s.symbol}</td>
+                    <td><span className={s.side === "LONG" ? "pill-good" : "pill-bad"}>{s.kind}</span></td>
+                    <td className="text-right font-mono">{(s.baseConfidence * 100).toFixed(0)}%</td>
+                    <td className="text-right font-mono text-slate-400">{s.coinglassScore?.toFixed(2) ?? "—"}</td>
+                    <td className="text-right font-mono font-bold">{(s.confidence * 100).toFixed(0)}%</td>
+                    <td className="text-right">{s.consumed ? <span className="text-success">●</span> : <span className="text-slate-600">○</span>}</td>
+                  </tr>
+                ))}
+                {recentSignals.length === 0 && (
+                  <tr><td colSpan={7} className="text-slate-500 py-3">No signals yet.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </Card>
       </section>
 

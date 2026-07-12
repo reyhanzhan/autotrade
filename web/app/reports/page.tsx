@@ -59,7 +59,7 @@ export default async function ReportsPage() {
   const avgCgLosses = cgLosses.length ? cgLosses.reduce((s, v) => s + v, 0) / cgLosses.length : null;
 
   return (
-    <main className="max-w-6xl mx-auto p-6 space-y-6">
+    <main className="max-w-6xl mx-auto p-4 md:p-6 space-y-4 md:space-y-6">
       <header>
         <h1 className="text-2xl font-semibold">Reports</h1>
         <p className="text-slate-400 text-sm">Last 30 days · {closed.length} closed trades · {snapshotCount} Coinglass snapshots</p>
@@ -110,8 +110,9 @@ export default async function ReportsPage() {
       </Card>
 
       <Card title="PnL by Symbol">
-        <table className="t">
-          <thead><tr><th>Symbol</th><th className="text-right">Trades</th><th className="text-right">Win rate</th><th className="text-right">PnL</th></tr></thead>
+        <div className="overflow-x-auto hide-scrollbar">
+          <table className="t min-w-[400px]">
+            <thead><tr><th>Symbol</th><th className="text-right">Trades</th><th className="text-right">Win rate</th><th className="text-right">PnL</th></tr></thead>
           <tbody>
             {bySymbol.map((r) => (
               <tr key={r.key}>
@@ -124,11 +125,13 @@ export default async function ReportsPage() {
             {bySymbol.length === 0 && <tr><td colSpan={4} className="text-slate-500 py-3">No closed trades yet.</td></tr>}
           </tbody>
         </table>
+        </div>
       </Card>
 
       <Card title="PnL by SMC Pattern">
-        <table className="t">
-          <thead><tr><th>Pattern</th><th className="text-right">Trades</th><th className="text-right">Win rate</th><th className="text-right">PnL</th></tr></thead>
+        <div className="overflow-x-auto hide-scrollbar">
+          <table className="t min-w-[400px]">
+            <thead><tr><th>Pattern</th><th className="text-right">Trades</th><th className="text-right">Win rate</th><th className="text-right">PnL</th></tr></thead>
           <tbody>
             {byKind.map((r) => (
               <tr key={r.key}>
@@ -141,6 +144,7 @@ export default async function ReportsPage() {
             {byKind.length === 0 && <tr><td colSpan={4} className="text-slate-500 py-3">No closed trades yet.</td></tr>}
           </tbody>
         </table>
+        </div>
       </Card>
 
       <Card title="Coinglass Confluence Attribution">
@@ -155,8 +159,9 @@ export default async function ReportsPage() {
       </Card>
 
       <Card title="Recent Trades">
-        <table className="t">
-          <thead>
+        <div className="overflow-x-auto hide-scrollbar">
+          <table className="t min-w-[600px]">
+            <thead>
             <tr>
               <th>Closed</th>
               <th>Symbol · Side</th>
@@ -182,6 +187,7 @@ export default async function ReportsPage() {
             {trades.length === 0 && <tr><td colSpan={7} className="text-slate-500 py-3">No trades yet.</td></tr>}
           </tbody>
         </table>
+        </div>
       </Card>
 
       <Card title="Screening History">
@@ -204,8 +210,9 @@ export default async function ReportsPage() {
                 </div>
                 <p className="text-xs text-slate-500 mt-1">{r.reason}</p>
                 {r.signals.length > 0 && (
-                  <table className="t text-xs mt-2">
-                    <thead><tr><th>Symbol</th><th>Side</th><th>Kind</th><th className="text-right">SMC</th><th className="text-right">×CG</th><th className="text-right">Final</th><th className="text-right">Acted</th></tr></thead>
+                  <div className="overflow-x-auto hide-scrollbar">
+                    <table className="t text-xs mt-2 min-w-[500px]">
+                      <thead><tr><th>Symbol</th><th>Side</th><th>Kind</th><th className="text-right">SMC</th><th className="text-right">×CG</th><th className="text-right">Final</th><th className="text-right">Acted</th></tr></thead>
                     <tbody>
                       {r.signals.map((s) => (
                         <tr key={s.id}>
@@ -220,6 +227,7 @@ export default async function ReportsPage() {
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 )}
               </div>
             );

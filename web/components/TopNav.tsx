@@ -55,7 +55,7 @@ export function TopNav({ testnet, enabled }: { testnet?: boolean | null; enabled
           </Link>
           {status}
         </div>
-        <nav className="px-2 pb-2 flex gap-1 overflow-x-auto">
+        <nav className="px-2 pb-2 flex gap-1 overflow-x-auto hide-scrollbar">
           {ITEMS.map((item) => <NavItem key={item.href} item={item} pathname={pathname} compact />)}
         </nav>
       </header>

@@ -52,5 +52,15 @@ body {
 
 /* Calendar day cell base — color comes from inline style for PnL gradient */
 .cal-day {
-  @apply rounded-md p-2 min-h-[68px] flex flex-col justify-between border border-transparent hover:border-line transition cursor-default;
+  @apply rounded-md p-1 md:p-2 min-h-[56px] md:min-h-[68px] flex flex-col justify-between border border-transparent hover:border-line transition cursor-default;
+}
+
+@layer utilities {
+  .hide-scrollbar {
+    -ms-overflow-style: none;  /* IE and Edge */
+    scrollbar-width: none;  /* Firefox */
+  }
+  .hide-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
 }

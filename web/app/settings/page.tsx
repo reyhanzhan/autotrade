@@ -20,7 +20,7 @@ export default async function SettingsPage() {
   const min24hQuoteVolume = Number(process.env.MIN_24H_QUOTE_VOLUME ?? 10_000_000);
 
   return (
-    <main className="max-w-6xl mx-auto p-6 space-y-6">
+    <main className="max-w-6xl mx-auto p-4 md:p-6 space-y-4 md:space-y-6">
       <header>
         <h1 className="text-2xl font-semibold">Settings</h1>
         <p className="text-slate-400 text-sm">Configuration is read-only here. Update via the API (snippet below).</p>
@@ -59,7 +59,7 @@ export default async function SettingsPage() {
         <p className="text-sm text-slate-400 mb-3">
           Authenticate every request with the <code className="font-mono">DASHBOARD_API_TOKEN</code> from your <code className="font-mono">.env</code>.
         </p>
-        <pre className="text-xs bg-bg border border-line rounded-md p-3 overflow-auto font-mono">{`curl -X POST http://localhost:3000/api/config \\
+        <pre className="text-xs bg-bg border border-line rounded-md p-3 overflow-auto hide-scrollbar font-mono">{`curl -X POST http://localhost:3000/api/config \\
   -H "Authorization: Bearer $DASHBOARD_API_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{

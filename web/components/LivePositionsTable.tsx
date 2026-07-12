@@ -53,7 +53,7 @@ export function LivePositionsTable({
         <span>Live cache {new Date(snapshot.updatedAt).toLocaleTimeString()}</span>
       </div>
       {snapshot.error && <div className="text-xs text-yellow-300">{snapshot.error}</div>}
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto hide-scrollbar">
         <table className={`t min-w-[1120px] ${dense ? "text-xs" : ""}`}>
           <thead>
             <tr>
