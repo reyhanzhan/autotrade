@@ -14,7 +14,7 @@ export function resolveWatchlist(cfg: BotConfig): string[] {
   try {
     const parsed = JSON.parse(cfg.watchlist);
     if (Array.isArray(parsed) && parsed.length > 0) {
-      return dedupe(parsed.map((s: unknown) => String(s).trim().toUpperCase()).filter(Boolean));
+      return withoutBlacklisted(dedupe(parsed.map((s: unknown) => String(s).trim().toUpperCase()).filter(Boolean)));
     }
   } catch {
     // fall through
@@ -24,7 +24,8 @@ export function resolveWatchlist(cfg: BotConfig): string[] {
   const fromEnv = env.symbolList;
   const fromCfg = cfg.symbol ? [cfg.symbol.toUpperCase()] : [];
   const merged = dedupe([...fromCfg, ...fromEnv]);
-  return merged.length ? merged : ["BTCUSDT"];
+  const filtered = withoutBlacklisted(merged);
+  return filtered.length ? filtered : ["BTCUSDT"];
 }
 
 export function resolveExchangeUniverse(
@@ -68,10 +69,15 @@ export function resolveExchangeUniverse(
     ? fallbackByVolume
     : fallbackAlphabetical;
 
-  return dedupe(selected).slice(0, env.MAX_SCREENER_SYMBOLS);
+  return withoutBlacklisted(dedupe(selected)).slice(0, env.MAX_SCREENER_SYMBOLS);
 }
 
 function dedupe<T>(xs: T[]): T[] { return Array.from(new Set(xs)); }
+
+function withoutBlacklisted(symbols: string[]): string[] {
+  if (env.symbolBlacklist.size === 0) return symbols;
+  return symbols.filter((symbol) => !env.symbolBlacklist.has(symbol));
+}
 
 function isStandardUsdtSymbol(symbol: string): boolean {
   if (!/^[A-Z0-9]+USDT$/.test(symbol)) return false;

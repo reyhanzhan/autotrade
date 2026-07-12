@@ -329,6 +329,14 @@ export class TradingEngine {
           reason: `${interval} trend ${structure.trend} opposes ${signal.side}`,
         };
       }
+      if (!isPrimaryConfirmation && isStrictTrendPullbackLong(signal) && structure.trend !== requiredTrend) {
+        return {
+          accepted: false,
+          requiredTrend,
+          confirmations,
+          reason: `${interval} trend ${structure.trend} does not strictly confirm ${signal.kind}`,
+        };
+      }
     }
 
     await recordEvent("strategy", "info", "MTF confirmation accepted signal", {
@@ -557,6 +565,10 @@ function hasStrongFifteenMinuteSetup(signal: TradeSignal): boolean {
     fib !== undefined &&
     fib.riskReward >= 2
   );
+}
+
+function isStrictTrendPullbackLong(signal: TradeSignal): boolean {
+  return signal.kind === "TREND_PULLBACK_LONG";
 }
 
 function trendForSide(side: Side): StructureState["trend"] {

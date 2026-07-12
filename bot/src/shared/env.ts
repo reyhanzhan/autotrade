@@ -16,6 +16,7 @@ const schema = z.object({
 
   TESTNET: truthy.default("true"),
   SYMBOLS: z.string().default("BTCUSDT"),
+  SYMBOL_BLACKLIST: z.string().default(""),
   AUTO_DISCOVER_SYMBOLS: truthy.default("false"),
   MAX_SCREENER_SYMBOLS: z.coerce.number().int().min(1).max(200).default(80),
   MIN_24H_QUOTE_VOLUME: z.coerce.number().min(0).default(10_000_000),
@@ -67,6 +68,10 @@ export const env = {
   /** Pre-split list of symbols (uppercased, de-duped). */
   symbolList: dedupe(
     parsed.data.SYMBOLS.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean)
+  ),
+  /** Symbols excluded from watchlists and auto-discovery. */
+  symbolBlacklist: new Set(
+    parsed.data.SYMBOL_BLACKLIST.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean)
   ),
   /** True only if Coinglass key is present. */
   hasCoinglass: parsed.data.COINGLASS_API_KEY.length > 0,
