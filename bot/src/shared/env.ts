@@ -39,6 +39,8 @@ const schema = z.object({
   STRONG_TREND_ADX: z.coerce.number().min(1).max(100).default(25),
   RANGING_ADX: z.coerce.number().min(1).max(100).default(20),
   STRONG_TREND_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.65),
+  TREND_PULLBACK_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.66),
+  FIB_SETUP_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.75),
   RANGING_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.75),
   HIGH_RISK_SHORT_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.75),
   AUTO_BLACKLIST_ENABLED: truthy.default("true"),

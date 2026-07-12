@@ -240,9 +240,23 @@ function clamp01(n: number): number { return Math.max(0, Math.min(1, n)); }
 
 function thresholdFor(signal: TradeSignal, fallback: number): { threshold: number; reason: string } {
   if (!env.DYNAMIC_CONFIDENCE_ENABLED) return { threshold: fallback, reason: "fixed" };
+  const isTrendPullback = signal.kind.startsWith("TREND_PULLBACK_");
+  const isFibSetup = signal.kind.includes("_FIB");
+
+  if (!isTrendPullback && isFibSetup) {
+    return { threshold: env.FIB_SETUP_MIN_CONFIDENCE, reason: "fib_setup" };
+  }
+
   const adx = signal.context.trendPullback?.adx;
-  if (adx === undefined || !Number.isFinite(adx)) return { threshold: fallback, reason: "no_adx" };
-  if (adx > env.STRONG_TREND_ADX) return { threshold: Math.min(fallback, env.STRONG_TREND_MIN_CONFIDENCE), reason: `adx>${env.STRONG_TREND_ADX}` };
-  if (adx < env.RANGING_ADX) return { threshold: Math.max(fallback, env.RANGING_MIN_CONFIDENCE), reason: `adx<${env.RANGING_ADX}` };
-  return { threshold: fallback, reason: "normal_adx" };
+  if (!isTrendPullback) return { threshold: fallback, reason: "default_setup" };
+  if (adx === undefined || !Number.isFinite(adx)) {
+    return { threshold: env.TREND_PULLBACK_MIN_CONFIDENCE, reason: "trend_pullback_no_adx" };
+  }
+  if (adx > env.STRONG_TREND_ADX) {
+    return { threshold: env.STRONG_TREND_MIN_CONFIDENCE, reason: `trend_pullback_adx>${env.STRONG_TREND_ADX}` };
+  }
+  if (adx < env.RANGING_ADX) {
+    return { threshold: env.RANGING_MIN_CONFIDENCE, reason: `trend_pullback_adx<${env.RANGING_ADX}` };
+  }
+  return { threshold: env.TREND_PULLBACK_MIN_CONFIDENCE, reason: "trend_pullback_normal" };
 }
