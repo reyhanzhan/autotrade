@@ -84,3 +84,63 @@ function isStandardUsdtSymbol(symbol: string): boolean {
   const base = symbol.slice(0, -"USDT".length);
   return base.length >= 3;
 }
+
+import { prisma } from "../shared/db.js";
+
+/** 
+ * Returns a set of symbols that should be dynamically blacklisted for 14 days
+ * based on poor historical performance (Win Rate < 30% or >= 3 consecutive losses).
+ */
+export async function getDynamicBlacklist(): Promise<Set<string>> {
+  const dynamicBlacklist = new Set<string>();
+  try {
+    const trades = await prisma.trade.findMany({
+      where: {
+        closedAt: { not: null },
+      },
+      orderBy: { closedAt: 'desc' }
+    });
+    
+    // Group trades by symbol
+    const tradesBySymbol = new Map<string, typeof trades>();
+    for (const t of trades) {
+      const arr = tradesBySymbol.get(t.symbol) || [];
+      arr.push(t);
+      tradesBySymbol.set(t.symbol, arr);
+    }
+    
+    const cutoff14Days = Date.now() - 14 * 24 * 60 * 60 * 1000;
+    
+    for (const [symbol, symTrades] of tradesBySymbol.entries()) {
+      if (symTrades.length === 0) continue;
+      
+      const lastTradeTime = symTrades[0]?.closedAt?.getTime() ?? 0;
+      if (lastTradeTime < cutoff14Days) continue; // 14 days have passed
+      
+      let consecutiveLosses = 0;
+      for (const t of symTrades) {
+        if (t.pnl && t.pnl < 0) consecutiveLosses++;
+        else break;
+      }
+      
+      const minTradesForWr = 5;
+      let isBlacklisted = false;
+      
+      if (consecutiveLosses >= 3) {
+        isBlacklisted = true;
+      } else if (symTrades.length >= minTradesForWr) {
+        let wins = 0;
+        for (const t of symTrades) {
+          if (t.pnl && t.pnl > 0) wins++;
+        }
+        const wr = wins / symTrades.length;
+        if (wr < 0.3) isBlacklisted = true;
+      }
+      
+      if (isBlacklisted) dynamicBlacklist.add(symbol);
+    }
+  } catch (err) {
+    // Ignore db error
+  }
+  return dynamicBlacklist;
+}

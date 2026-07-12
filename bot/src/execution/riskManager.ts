@@ -77,10 +77,31 @@ export class RiskManager {
       return false;
     }
 
+    const directionalOpen = await prisma.position.count({ where: { side: signal.side } });
+    if (directionalOpen >= 2) {
+      await recordEvent("execution", "warn", "Directional concurrency cap (2) reached; skipping", { side: signal.side, directionalOpen });
+      return false;
+    }
+
     const existing = await prisma.position.findUnique({ where: { symbol } });
     if (existing) {
       await recordEvent("execution", "warn", "Position already open for symbol; skipping", { symbol });
       return false;
+    }
+
+    try {
+      const spreadCheck = await this.client.bookTicker(symbol);
+      const ask = parseFloat(spreadCheck.askPrice);
+      const bid = parseFloat(spreadCheck.bidPrice);
+      if (ask > 0 && bid > 0) {
+        const spread = (ask - bid) / bid;
+        if (spread > 0.0005) { // 0.05%
+          await recordEvent("execution", "warn", "Spread too wide; skipping execution", { symbol, spread: (spread * 100).toFixed(4) + "%" });
+          return false;
+        }
+      }
+    } catch (err) {
+      logger.warn({ symbol, err: (err as Error).message }, "Spread check failed, proceeding anyway");
     }
 
     await this.ensureSettingsFor(symbol);

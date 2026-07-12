@@ -245,6 +245,11 @@ export class BinanceFuturesClient {
     return this.publicGet<Ticker24hr[]>("/fapi/v1/ticker/24hr");
   }
 
+  /** Order book ticker for spread checking. */
+  async bookTicker(symbol: string): Promise<{ bidPrice: string; bidQty: string; askPrice: string; askQty: string }> {
+    return this.publicGet("/fapi/v1/ticker/bookTicker", { symbol });
+  }
+
   /** Historical K-lines used to warm the in-memory WebSocket buffers on boot. */
   async klines(symbol: string, interval: string, limit = 100): Promise<Candle[]> {
     const rows = await this.publicGet<unknown[]>("/fapi/v1/klines", {

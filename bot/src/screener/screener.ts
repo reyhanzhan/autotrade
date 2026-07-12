@@ -112,10 +112,8 @@ export class Screener {
       if (Date.now() - c.detectedAt > ttl) this.candidates.delete(sym);
     }
 
-    if (this.candidates.size === 0) return;
-
-    // 3. Cross-symbol screening pass
-    return await this.runScreeningPass(excludedSymbols);
+    // 3. Cross-symbol screening pass will be triggered externally via runScreeningPass()
+    return;
   }
 
   /** Manually trigger a screening pass against the current candidate cache. */
@@ -149,19 +147,18 @@ export class Screener {
     scored.sort((a, b) => b.finalConfidence - a.finalConfidence);
     const winner = scored[0];
 
-    // Persist ScreeningRun + per-candidate Signal rows.
     const run = await prisma.screeningRun.create({
       data: {
         interval: this.opts.interval,
         symbolsScanned: symbolsJson,
         candidateCount: scored.length,
-        selectedSymbol: winner && winner.finalConfidence >= this.opts.minConfidence ? winner.sym : null,
-        selectedSide: winner && winner.finalConfidence >= this.opts.minConfidence ? winner.candidate.signal.side : null,
+        selectedSymbol: winner && winner.finalConfidence >= (winner.candidate.signal.context.dynamicThreshold as number ?? this.opts.minConfidence) ? winner.sym : null,
+        selectedSide: winner && winner.finalConfidence >= (winner.candidate.signal.context.dynamicThreshold as number ?? this.opts.minConfidence) ? winner.candidate.signal.side : null,
         bestConfidence: winner?.finalConfidence ?? null,
         reason: winner
-          ? winner.finalConfidence >= this.opts.minConfidence
+          ? winner.finalConfidence >= (winner.candidate.signal.context.dynamicThreshold as number ?? this.opts.minConfidence)
             ? `Selected ${winner.sym} ${winner.candidate.signal.side} @ ${winner.finalConfidence.toFixed(2)}`
-            : `Best candidate ${winner.sym} below threshold (${winner.finalConfidence.toFixed(2)} < ${this.opts.minConfidence})`
+            : `Best candidate ${winner.sym} below threshold (${winner.finalConfidence.toFixed(2)} < ${(winner.candidate.signal.context.dynamicThreshold as number ?? this.opts.minConfidence)})`
           : "No candidates",
       },
     });
@@ -201,7 +198,8 @@ export class Screener {
       bestConfidence: winner?.finalConfidence ?? null,
     });
 
-    if (!winner || winner.finalConfidence < this.opts.minConfidence) {
+    const dynThresh = winner?.candidate.signal.context.dynamicThreshold as number ?? this.opts.minConfidence;
+    if (!winner || winner.finalConfidence < dynThresh) {
       return { runId: run.id, candidates: scored.length };
     }
 

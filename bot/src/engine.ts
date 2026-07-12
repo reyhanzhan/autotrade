@@ -29,6 +29,7 @@ import { PositionReconciler } from "./reconciler/positionReconciler.js";
 import { BalancePoller } from "./reconciler/balancePoller.js";
 import type { Candle, Side, StructureState, TradeSignal } from "./shared/types.js";
 import { analyzeStructure, DEFAULT_STRUCTURE_OPTS } from "./strategy/structure.js";
+import { computeRSI } from "./strategy/indicators.js";
 
 export class TradingEngine {
   private stream?: BinanceStream;
@@ -47,6 +48,9 @@ export class TradingEngine {
   private warmupRetryInFlight = false;
   private restPollingTimer?: NodeJS.Timeout;
   private restPollingInFlight = false;
+  private batchTimer?: NodeJS.Timeout;
+  private btcRegimeTimer?: NodeJS.Timeout;
+  private btcRegimeSafe = true;
 
   async start(): Promise<void> {
     const cfg = await prisma.botConfig.findFirst({ where: { enabled: true } });
@@ -146,6 +150,8 @@ export class TradingEngine {
 
     this.stream.connect();
     this.startRestCandlePolling(client, watchlist, interval);
+    this.startBtcRegimePolling(client);
+    this.startDynamicBlacklistPolling();
     await recordEvent("engine", "info", "Engine started", {
       symbols: watchlist, interval, live: env.LIVE_TRADING, testnet: cfg.testnet,
       coinglass: env.hasCoinglass, minConfidence,
@@ -163,9 +169,26 @@ export class TradingEngine {
     if (!this.screener || !this.risk) return;
     if (Date.now() < this.globalExecutionCooldownUntil || this.executionInFlight) return;
 
-    const result = await this.screener.onClosedCandle(symbol, all, this.cooldownSymbols());
+    // Regimer filter check
+    if (!this.btcRegimeSafe && symbol !== "BTCUSDT") return;
+
+    await this.screener.onClosedCandle(symbol, all, this.cooldownSymbols());
+
+    if (!this.batchTimer) {
+      this.batchTimer = setTimeout(() => {
+        this.batchTimer = undefined;
+        void this.processBatchScreening(closed);
+      }, 5000);
+    }
+  }
+
+  private async processBatchScreening(closed: Candle): Promise<void> {
+    if (!this.screener || !this.risk) return;
+    if (Date.now() < this.globalExecutionCooldownUntil || this.executionInFlight) return;
+    
+    const result = await this.screener.runScreeningPass(this.cooldownSymbols());
     if (!result?.selected) {
-      await this.maybeRecordScanningHeartbeat(symbol, closed, result?.candidates ?? 0);
+      await this.maybeRecordScanningHeartbeat("BATCH", closed, result?.candidates ?? 0);
       return;
     }
 
@@ -321,6 +344,24 @@ export class TradingEngine {
           reason: `${interval} trend ${structure.trend} does not confirm ${signal.side}`,
         };
       }
+
+      if (interval === "4h") {
+        const rsi = computeRSI(candles, 14);
+        if (signal.side === "LONG" && rsi !== undefined && rsi > 70) {
+           const prevRsi = computeRSI(candles.slice(0, -1), 14) ?? 0;
+           if (rsi < prevRsi) {
+              return { accepted: false, requiredTrend, confirmations, reason: "4H RSI > 70 and dropping (Momentum fading)" };
+           }
+        }
+        if (signal.side === "SHORT" && structure.trend === "RANGING") {
+           if (signal.confidence < 0.75) {
+              return { accepted: false, requiredTrend, confirmations, reason: "4H Ranging requires 0.75+ confidence for SHORT" };
+           }
+           riskMultiplier = env.MTF_RANGING_RISK_MULTIPLIER;
+           riskReason = "High Risk Short (4H Ranging)";
+        }
+      }
+
       if (!isPrimaryConfirmation && isOppositeTrend(structure.trend, requiredTrend)) {
         return {
           accepted: false,
@@ -365,12 +406,46 @@ export class TradingEngine {
   }
 
   async stop(): Promise<void> {
+    if (this.batchTimer) clearTimeout(this.batchTimer);
+    if (this.btcRegimeTimer) clearInterval(this.btcRegimeTimer);
+    if (this.dynamicBlacklistTimer) clearInterval(this.dynamicBlacklistTimer);
     if (this.warmupRetryTimer) clearInterval(this.warmupRetryTimer);
     if (this.restPollingTimer) clearInterval(this.restPollingTimer);
     this.balancePoller?.stop();
     this.reconciler?.stop();
     this.stream?.close();
     await prisma.$disconnect();
+  }
+
+  private startBtcRegimePolling(client: BinanceFuturesClient): void {
+    if (this.btcRegimeTimer) return;
+    const poll = async () => {
+      try {
+        const klines4h = await client.klines("BTCUSDT", "4h", 20);
+        const klines1h = await client.klines("BTCUSDT", "1h", 20);
+        const struct4h = analyzeStructure(klines4h, DEFAULT_STRUCTURE_OPTS);
+        const struct1h = analyzeStructure(klines1h, DEFAULT_STRUCTURE_OPTS);
+        
+        const isCrash = (struct4h.trend === "BEARISH" || struct1h.trend === "BEARISH");
+        const isRanging = struct4h.trend === "RANGING" || struct1h.trend === "RANGING";
+        
+        const oldState = this.btcRegimeSafe;
+        this.btcRegimeSafe = !(isCrash || isRanging);
+        
+        if (oldState !== this.btcRegimeSafe) {
+           await recordEvent("engine", "info", `BTC Regime changed: ${this.btcRegimeSafe ? 'SAFE' : 'UNSAFE'}`, {
+             struct4h: struct4h.trend,
+             struct1h: struct1h.trend,
+             isCrash,
+             isRanging
+           });
+        }
+      } catch (err) {
+        logger.warn({ err: (err as Error).message }, "BTC Regime poll failed");
+      }
+    };
+    this.btcRegimeTimer = setInterval(() => void poll(), 300_000);
+    void poll();
   }
 
   private startRestCandlePolling(
@@ -515,7 +590,31 @@ export class TradingEngine {
       if (until > now) symbols.add(symbol);
       else this.executionCooldownUntil.delete(symbol);
     }
+    
+    // Also include dynamic blacklist
+    for (const symbol of this.dynamicBlacklist) {
+      symbols.add(symbol);
+    }
+    
     return symbols;
+  }
+
+  private dynamicBlacklist = new Set<string>();
+  private dynamicBlacklistTimer?: NodeJS.Timeout;
+
+  private startDynamicBlacklistPolling(): void {
+    if (this.dynamicBlacklistTimer) return;
+    const poll = async () => {
+      try {
+        const { getDynamicBlacklist } = await import("./screener/symbols.js");
+        const list = await getDynamicBlacklist();
+        this.dynamicBlacklist = list;
+      } catch (err) {
+        // tolerate
+      }
+    };
+    this.dynamicBlacklistTimer = setInterval(() => void poll(), 15 * 60 * 1000); // 15 mins
+    void poll();
   }
 
   private setExecutionCooldown(

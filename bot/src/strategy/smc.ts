@@ -27,6 +27,7 @@ import type { Candle, FairValueGap, OrderBlock, StructureState, TradeSignal } fr
 import { analyzeStructure, DEFAULT_STRUCTURE_OPTS } from "./structure.js";
 import { findOrderBlocks, DEFAULT_OB_OPTS } from "./orderBlock.js";
 import { findFairValueGaps, DEFAULT_FVG_OPTS } from "./fvg.js";
+import { computeATR, computeEMA, computeADX } from "./indicators.js";
 
 export interface SMCConfig {
   symbol: string;
@@ -97,7 +98,15 @@ export class SMCEngine {
           hasFVG: zone.source === "FVG",
           hasFib: true,
         });
-        if (confidence >= this.cfg.minConfidence) {
+
+        let dynamicThreshold = this.cfg.minConfidence;
+        const adx = computeADX(preTapCandles, 14);
+        if (adx !== undefined) {
+          if (adx > 25) dynamicThreshold = Math.max(0, this.cfg.minConfidence - 0.03); // e.g. 0.65
+          else if (adx < 20) dynamicThreshold = Math.min(1, this.cfg.minConfidence + 0.07); // e.g. 0.75
+        }
+
+        if (confidence >= dynamicThreshold) {
           const kind = `${zone.source}_TAP_${side}`;
 
           return {
@@ -114,6 +123,7 @@ export class SMCEngine {
               orderBlock: zone.source === "OB" ? zone.raw : undefined,
               fvg: zone.source === "FVG" ? zone.raw : undefined,
               fibonacci: fibPlan.fibonacci,
+              dynamicThreshold,
             },
           };
         }
@@ -130,7 +140,20 @@ export class SMCEngine {
       riskReward: this.cfg.trendPullbackRiskReward,
       slAtrMult: this.cfg.trendPullbackSlAtrMult,
     });
-    if (trendPullback && trendPullback.confidence >= this.cfg.minConfidence) return trendPullback;
+    
+    if (trendPullback) {
+      let dynamicThreshold = this.cfg.minConfidence;
+      const adx = computeADX(candles.filter((c) => c.openTime < lastClosed.openTime), 14);
+      if (adx !== undefined) {
+        if (adx > 25) dynamicThreshold = Math.max(0, this.cfg.minConfidence - 0.03);
+        else if (adx < 20) dynamicThreshold = Math.min(1, this.cfg.minConfidence + 0.07);
+      }
+      
+      if (trendPullback.confidence >= dynamicThreshold) {
+        trendPullback.context.dynamicThreshold = dynamicThreshold;
+        return trendPullback;
+      }
+    }
   }
 }
 
@@ -185,7 +208,7 @@ function buildFibTradePlan(
     lastSwingHigh?: { price: number };
     lastSwingLow?: { price: number };
   },
-  buffer: number,
+  buffer: number, // In ATR
   riskReward: number,
   marketEntry: number
 ): FibTradePlan | undefined {
@@ -205,7 +228,11 @@ function buildFibTradePlan(
     const entryPrice = marketEntry;
     if (entryPrice < goldenLow || entryPrice > goldenHigh) return;
 
-    const stopLoss = Math.min(zone.low - buffer, fib786 - buffer);
+    let stopLoss = Math.min(zone.low - buffer, fib786 - buffer);
+    const rawDist = entryPrice - stopLoss;
+    const minDist = Math.max(buffer * 3, entryPrice * 0.005); // buffer is atr * 0.5, so buffer * 3 = 1.5 * atr
+    if (rawDist < minDist) stopLoss = entryPrice - minDist;
+
     const risk = entryPrice - stopLoss;
     if (risk <= 0) return;
 
@@ -236,7 +263,11 @@ function buildFibTradePlan(
   const entryPrice = marketEntry;
   if (entryPrice < goldenLow || entryPrice > goldenHigh) return;
 
-  const stopLoss = Math.max(zone.high + buffer, fib786 + buffer);
+  let stopLoss = Math.max(zone.high + buffer, fib786 + buffer);
+  const rawDist = stopLoss - entryPrice;
+  const minDist = Math.max(buffer * 3, entryPrice * 0.005); // buffer is atr * 0.5, so buffer * 3 = 1.5 * atr
+  if (rawDist < minDist) stopLoss = entryPrice + minDist;
+
   const risk = stopLoss - entryPrice;
   if (risk <= 0) return;
 
@@ -293,7 +324,10 @@ function buildTrendPullbackSignal(input: TrendPullbackInput): TradeSignal | unde
     const notOverextended = entryPrice - ema20 <= input.atr * 2.5;
     if (!trendAligned || !pulledBack || !resumed || !notOverextended) return;
 
-    const stopLoss = Math.min(pullbackLow - input.atr * 0.25, entryPrice - input.atr * input.slAtrMult);
+    let stopLoss = Math.min(pullbackLow - input.atr * 0.25, entryPrice - input.atr * input.slAtrMult);
+    const minDist = Math.max(input.atr * 1.5, entryPrice * 0.005);
+    if (entryPrice - stopLoss < minDist) stopLoss = entryPrice - minDist;
+
     const risk = entryPrice - stopLoss;
     if (risk <= 0) return;
 
@@ -324,10 +358,13 @@ function buildTrendPullbackSignal(input: TrendPullbackInput): TradeSignal | unde
   const trendAligned = input.structure.trend === "BEARISH" && ema50 < ema200 && entryPrice < ema50 && entryPrice < ema200;
   const pulledBack = pullbackHigh >= ema20 || pullbackHigh >= ema50;
   const resumed = last.close < ema20 && last.close < last.open && last.close < prev.close;
-  const notOverextended = ema20 - entryPrice <= input.atr * 2.5;
+    const notOverextended = ema20 - entryPrice <= input.atr * 2.5;
   if (!trendAligned || !pulledBack || !resumed || !notOverextended) return;
 
-  const stopLoss = Math.max(pullbackHigh + input.atr * 0.25, entryPrice + input.atr * input.slAtrMult);
+  let stopLoss = Math.max(pullbackHigh + input.atr * 0.25, entryPrice + input.atr * input.slAtrMult);
+  const minDist = Math.max(input.atr * 1.5, entryPrice * 0.005);
+  if (stopLoss - entryPrice < minDist) stopLoss = entryPrice + minDist;
+
   const risk = stopLoss - entryPrice;
   if (risk <= 0) return;
 
@@ -355,29 +392,7 @@ function buildTrendPullbackSignal(input: TrendPullbackInput): TradeSignal | unde
   };
 }
 
-/** Wilder-style ATR. */
-function computeATR(candles: Candle[], period: number): number | undefined {
-  if (candles.length < period + 1) return;
-  const trs: number[] = [];
-  for (let i = 1; i < candles.length; i++) {
-    const c = candles[i]!;
-    const p = candles[i - 1]!;
-    trs.push(Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close)));
-  }
-  let atr = trs.slice(0, period).reduce((s, v) => s + v, 0) / period;
-  for (let i = period; i < trs.length; i++) atr = (atr * (period - 1) + trs[i]!) / period;
-  return atr;
-}
 
-function computeEMA(candles: Candle[], period: number): number | undefined {
-  if (candles.length < period) return;
-  const k = 2 / (period + 1);
-  let ema = candles.slice(0, period).reduce((sum, c) => sum + c.close, 0) / period;
-  for (let i = period; i < candles.length; i++) {
-    ema = candles[i]!.close * k + ema * (1 - k);
-  }
-  return ema;
-}
 
 function scoreConfidence(parts: {
   structure: { trend: string; bos?: string };

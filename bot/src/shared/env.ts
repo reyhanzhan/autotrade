@@ -19,7 +19,7 @@ const schema = z.object({
   SYMBOL_BLACKLIST: z.string().default(""),
   AUTO_DISCOVER_SYMBOLS: truthy.default("false"),
   MAX_SCREENER_SYMBOLS: z.coerce.number().int().min(1).max(200).default(80),
-  MIN_24H_QUOTE_VOLUME: z.coerce.number().min(0).default(10_000_000),
+  MIN_24H_QUOTE_VOLUME: z.coerce.number().min(0).default(30_000_000),
   INTERVAL: z
     .enum(["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"])
     .default("15m"),
